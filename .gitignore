@@ -1,0 +1,11 @@
+# 忽略的数据和模型文件
+*.csv
+*.xlsx
+*.pkl
+*.raw
+*.mzML
+
+# 忽略环境配置
+.venv/
+__pycache__/
+.streamlit/secrets.toml
