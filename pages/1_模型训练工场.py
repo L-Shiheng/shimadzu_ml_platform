@@ -108,7 +108,8 @@ if st.session_state['data_loaded']:
         target_col = st.selectbox("1. 您希望模型预测什么？(选择目标列 / Label)", options=df.columns)
         
         candidate_features = [c for c in df.columns if c != target_col]
-        exclude_cols = st.multiselect("2. 排除非特征列 (如样本编号、日期等)", options=candidate_features)
+        # 提示用户排除编号列
+        exclude_cols = st.multiselect("2. 排除非特征列 (⚠️必须排除样本编号如 Sample_ID)", options=candidate_features)
         
         # 提取用于训练的纯特征列名
         feature_cols = [c for c in candidate_features if c not in exclude_cols]
@@ -138,10 +139,17 @@ if st.session_state['data_loaded']:
         if len(feature_cols) < 2:
             st.error("特征列太少，请检查是否排除了过多的列！")
         else:
-            with st.spinner("正在执行降维和 XGBoost 模型训练，请稍候..."):
+            with st.spinner("正在自动清洗格式、执行降维和 XGBoost 模型训练，请稍候..."):
                 try:
-                    X = df[feature_cols].values
+                    # ---------------- 新增：强力脏数据清洗 ----------------
+                    X_df = df[feature_cols].copy()
+                    for col in X_df.columns:
+                        # 把仪器导出的 "----" 等奇怪字符全部强行变成标准的空值 (NaN)
+                        X_df[col] = pd.to_numeric(X_df[col], errors='coerce') 
+                    
+                    X = X_df.values
                     y_raw = df[target_col].values
+                    # --------------------------------------------------------
                     
                     # 标签自动转换 (将文字标签转为 0, 1, 2...)
                     le = LabelEncoder()
@@ -150,7 +158,7 @@ if st.session_state['data_loaded']:
                     
                     # 构建 Pipeline
                     ms_pipeline = Pipeline(steps=[
-                        ('imputer', SimpleImputer(strategy='median')), 
+                        ('imputer', SimpleImputer(strategy='median')), # 刚才生成的 NaN 会在这里被中位数填补
                         ('scaler', StandardScaler()), 
                         ('feature_selector', MassSpecFeatureSelector(
                             selection_method=sel_method,
