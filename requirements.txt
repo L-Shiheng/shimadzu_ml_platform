@@ -4,6 +4,6 @@ numpy
 scikit-learn
 matplotlib
 seaborn
-pycaret
+pycaret==3.0.0
 joblib
 
