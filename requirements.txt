@@ -3,5 +3,4 @@ pandas
 scikit-learn
 matplotlib
 seaborn
-pycaret>=3.3.2
 joblib
