@@ -141,24 +141,23 @@ if st.session_state['data_loaded']:
         else:
             with st.spinner("正在自动清洗格式、执行降维和 XGBoost 模型训练，请稍候..."):
                 try:
-                    # ---------------- 新增：强力脏数据清洗 ----------------
+                    # ---------------- 强力脏数据清洗 ----------------
                     X_df = df[feature_cols].copy()
                     for col in X_df.columns:
-                        # 把仪器导出的 "----" 等奇怪字符全部强行变成标准的空值 (NaN)
                         X_df[col] = pd.to_numeric(X_df[col], errors='coerce') 
                     
                     X = X_df.values
                     y_raw = df[target_col].values
-                    # --------------------------------------------------------
+                    # ------------------------------------------------
                     
-                    # 标签自动转换 (将文字标签转为 0, 1, 2...)
+                    # 标签自动转换
                     le = LabelEncoder()
                     y = le.fit_transform(y_raw)
                     st.session_state['label_encoder'] = le 
                     
                     # 构建 Pipeline
                     ms_pipeline = Pipeline(steps=[
-                        ('imputer', SimpleImputer(strategy='median')), # 刚才生成的 NaN 会在这里被中位数填补
+                        ('imputer', SimpleImputer(strategy='median')), 
                         ('scaler', StandardScaler()), 
                         ('feature_selector', MassSpecFeatureSelector(
                             selection_method=sel_method,
@@ -204,14 +203,19 @@ if st.session_state['data_loaded']:
         df_plot = st.session_state['feature_importance_df']
         top_n = min(20, len(df_plot))
         
-        fig, ax = plt.subplots(figsize=(10, 6))
+        # ---------------- 解决中文乱码，改为国际化全英文排版 ----------------
+        fig, ax = plt.subplots(figsize=(10, 8)) 
+        
         sns.barplot(x='Importance', y='Feature', data=df_plot.head(top_n), palette='viridis', ax=ax)
-        ax.set_title(f"Top {top_n} 核心标志物特征重要性排名", fontsize=14, pad=15)
-        ax.set_xlabel("XGBoost 权重贡献度", fontsize=12)
-        ax.set_ylabel("代谢物 / 特征名称", fontsize=12)
+        
+        ax.set_title(f"Top {top_n} Biomarkers Feature Importance", fontsize=16, pad=15, fontweight='bold')
+        ax.set_xlabel("XGBoost Feature Weight / Importance Score", fontsize=12)
+        ax.set_ylabel("Metabolites / Features", fontsize=12)
+        
+        plt.subplots_adjust(left=0.4) # 防止代谢物名字太长被切掉
         sns.despine()
-        plt.tight_layout()
         st.pyplot(fig)
+        # --------------------------------------------------------------------
         
         # 打包供下一个页面使用的对象
         model_package = {
