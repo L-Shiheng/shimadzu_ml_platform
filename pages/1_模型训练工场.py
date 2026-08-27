@@ -5,10 +5,11 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import cross_val_score
+from sklearn.inspection import permutation_importance
 from xgboost import XGBClassifier
+from sklearn.neural_network import MLPClassifier
 import joblib
 import io
 
@@ -21,11 +22,8 @@ except ImportError:
     from sklearn.feature_selection import SelectKBest, SelectFdr, SelectFwe, f_classif
     class MassSpecFeatureSelector(BaseEstimator, TransformerMixin):
         def __init__(self, selection_method='fdr', n_features_to_select=100, alpha=0.05, remove_redundant=True, corr_threshold=0.9):
-            self.selection_method = selection_method
-            self.n_features_to_select = n_features_to_select
-            self.alpha = alpha
-            self.remove_redundant = remove_redundant
-            self.corr_threshold = corr_threshold
+            self.selection_method = selection_method; self.n_features_to_select = n_features_to_select
+            self.alpha = alpha; self.remove_redundant = remove_redundant; self.corr_threshold = corr_threshold
             self.final_indices_ = None
         def fit(self, X, y):
             X_array = X.values if hasattr(X, 'values') else X
@@ -44,12 +42,10 @@ except ImportError:
                     sorted_idx = np.argsort(f_scores)[::-1]
                     selected_subset = []
                     for idx in sorted_idx:
-                        if not selected_subset:
-                            selected_subset.append(idx)
+                        if not selected_subset: selected_subset.append(idx)
                         else:
                             corr_vals = np.abs([np.corrcoef(X_selected[:, idx], X_selected[:, sel])[0, 1] for sel in selected_subset])
-                            if np.max(corr_vals) <= self.corr_threshold:
-                                selected_subset.append(idx)
+                            if np.max(corr_vals) <= self.corr_threshold: selected_subset.append(idx)
                     self.final_indices_ = current_indices[selected_subset]
                 else: self.final_indices_ = current_indices
             except:
@@ -61,175 +57,145 @@ except ImportError:
 # --- 页面初始化与状态管理 ---
 st.set_page_config(page_title="模型训练工场", page_icon="🛠️", layout="wide")
 
-if 'data_loaded' not in st.session_state:
-    st.session_state['data_loaded'] = False
-if 'model_trained' not in st.session_state:
-    st.session_state['model_trained'] = False
-if 'trained_pipeline' not in st.session_state:
-    st.session_state['trained_pipeline'] = None
-if 'df_raw' not in st.session_state:
-    st.session_state['df_raw'] = None
+for key in ['data_loaded', 'model_trained', 'trained_pipeline', 'df_raw']:
+    if key not in st.session_state: st.session_state[key] = None if key in ['trained_pipeline', 'df_raw'] else False
 
-st.title("🛠️ XGBoost 模型训练工场")
-st.markdown("上传实验数据，平台将自动执行数据清洗、统计学降维与去冗余，并训练出专业的 XGBoost 预测模型。")
+st.title("🛠️ 多引擎模型训练工场")
+st.markdown("支持 XGBoost 与深度神经网络 (DNN)，支持超参数微调，自动抽取核心生物标志物。")
 
 # --- 第一阶段：数据上传 ---
 st.header("1. 上传与核对数据")
-uploaded_file = st.file_uploader("请上传带有分组标签（如健康/患病）的特征矩阵文件 (支持 .csv 或 .xlsx)", type=['csv', 'xlsx'])
+uploaded_file = st.file_uploader("请上传特征矩阵文件 (支持 .csv 或 .xlsx)", type=['csv', 'xlsx'])
 
 if uploaded_file is not None:
     try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-            
-        st.session_state['df_raw'] = df
-        st.session_state['data_loaded'] = True
-        st.success(f"✅ 文件 '{uploaded_file.name}' 上传成功！包含 {df.shape[0]} 个样本，{df.shape[1]} 列信息。")
-        
-        with st.expander("👀 预览数据前 5 行"):
-            st.dataframe(df.head())
-            
-    except Exception as e:
-        st.error(f"读取文件失败: {e}")
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+        st.session_state['df_raw'] = df; st.session_state['data_loaded'] = True
+        st.success(f"✅ 文件上传成功！包含 {df.shape[0]} 样本，{df.shape[1]} 特征。")
+        with st.expander("👀 预览数据前 5 行"): st.dataframe(df.head())
+    except Exception as e: st.error(f"读取文件失败: {e}")
 
-# --- 第二阶段：指定目标与参数设置 ---
+# --- 第二阶段：参数设置 ---
 if st.session_state['data_loaded']:
     df = st.session_state['df_raw']
-    
     st.divider()
-    st.header("2. 设定目标与清洗参数")
+    st.header("2. 设定目标与核心算法")
     
     col1, col2 = st.columns(2)
-    
     with col1:
-        st.subheader("🎯 目标与特征范围")
-        target_col = st.selectbox("1. 您希望模型预测什么？(选择目标列 / Label)", options=df.columns)
-        
+        st.subheader("🎯 数据维度指定")
+        target_col = st.selectbox("1. 目标列 (Label)", options=df.columns)
         candidate_features = [c for c in df.columns if c != target_col]
-        # 提示用户排除编号列
-        exclude_cols = st.multiselect("2. 排除非特征列 (⚠️必须排除样本编号如 Sample_ID)", options=candidate_features)
-        
-        # 提取用于训练的纯特征列名
+        exclude_cols = st.multiselect("2. 排除非特征列 (如编号 Sample_ID)", options=candidate_features)
         feature_cols = [c for c in candidate_features if c not in exclude_cols]
         
     with col2:
-        st.subheader("⚙️ 行业预置清洗参数")
-        preset_choice = st.selectbox(
-            "选择预处理方案:",
-            ("【自动挡】代谢组学常规推荐 (XGBoost优选)", "【手动挡】自定义高级设置")
-        )
+        st.subheader("🧠 算法引擎与特征筛选")
+        model_choice = st.selectbox("选择机器学习核心引擎:", ["XGBoost (树模型王者，推荐)", "Deep Neural Network (深度神经网络)"])
+        sel_method = st.selectbox("前置统计特征筛选", ['fdr', 'kbest', 'fwe'], index=0)
+
+    # --- 高级调参面板 ---
+    with st.expander("⚙️ 打开模型超参数微调面板 (Hyperparameter Tuning)"):
+        st.markdown(f"当前正在配置：**{model_choice}**")
+        tune_col1, tune_col2 = st.columns(2)
         
-        if preset_choice == "【手动挡】自定义高级设置":
-            sel_method = st.selectbox("统计筛选方法", ['fdr', 'kbest', 'fwe'])
-            alpha_val = st.number_input("统计显著性阈值 (Alpha/P-value)", value=0.05, step=0.01)
-            corr_thresh = st.slider("去冗余相关系数阈值", 0.5, 1.0, 0.9)
+        if "XGBoost" in model_choice:
+            with tune_col1:
+                xgb_n_estimators = st.slider("决策树数量 (n_estimators)", 50, 500, 100, step=50, help="树越多拟合越强，但容易过拟合")
+                xgb_max_depth = st.slider("树的最大深度 (max_depth)", 3, 15, 6, help="单棵树的复杂度")
+            with tune_col2:
+                xgb_lr = st.selectbox("学习率 (learning_rate)", [0.01, 0.05, 0.1, 0.2, 0.3], index=2)
+                
+            classifier_obj = XGBClassifier(n_estimators=xgb_n_estimators, max_depth=xgb_max_depth, learning_rate=xgb_lr, random_state=42, eval_metric='logloss')
+            
         else:
-            sel_method = 'fdr'
-            alpha_val = 0.05
-            corr_thresh = 0.9
-            st.info(f"**自动采用:** 检验方法=`{sel_method}`, 显著性=`{alpha_val}`, 冗余上限=`{corr_thresh}`")
+            with tune_col1:
+                dnn_layers = st.text_input("隐藏层架构 (用逗号分隔)", "100, 50", help="例如 '100, 50' 代表两层，分别有100和50个神经元")
+                dnn_max_iter = st.slider("最大训练轮数 (max_iter)", 200, 2000, 500, step=100)
+            with tune_col2:
+                dnn_activation = st.selectbox("激活函数 (activation)", ["relu", "tanh", "logistic"])
+                dnn_lr = st.selectbox("初始学习率 (learning_rate_init)", [0.001, 0.01, 0.05], index=0)
+                
+            # 解析字符串为元组
+            try:
+                hidden_layer_sizes = tuple(int(x.strip()) for x in dnn_layers.split(','))
+            except:
+                st.warning("架构格式错误，已恢复默认 (100, 50)")
+                hidden_layer_sizes = (100, 50)
+                
+            classifier_obj = MLPClassifier(hidden_layer_sizes=hidden_layer_sizes, activation=dnn_activation, learning_rate_init=dnn_lr, max_iter=dnn_max_iter, random_state=42)
 
     # --- 第三阶段：触发训练 ---
     st.divider()
     st.header("3. 训练与打包")
     
-    if st.button("🚀 开始训练 XGBoost 模型并打包", type="primary"):
-        if len(feature_cols) < 2:
-            st.error("特征列太少，请检查是否排除了过多的列！")
+    if st.button(f"🚀 开始训练 {model_choice.split()[0]} 并打包", type="primary"):
+        if len(feature_cols) < 2: st.error("特征列太少！")
         else:
-            with st.spinner("正在自动清洗格式、执行降维和 XGBoost 模型训练，请稍候..."):
+            with st.spinner(f"正在清洗数据并训练 {model_choice}，请稍候..."):
                 try:
-                    # ---------------- 强力脏数据清洗 ----------------
+                    # 数据清洗
                     X_df = df[feature_cols].copy()
-                    for col in X_df.columns:
-                        X_df[col] = pd.to_numeric(X_df[col], errors='coerce') 
-                    
+                    for col in X_df.columns: X_df[col] = pd.to_numeric(X_df[col], errors='coerce') 
                     X = X_df.values
-                    y_raw = df[target_col].values
-                    # ------------------------------------------------
-                    
-                    # 标签自动转换
-                    le = LabelEncoder()
-                    y = le.fit_transform(y_raw)
-                    st.session_state['label_encoder'] = le 
+                    y = LabelEncoder().fit_transform(df[target_col].values)
+                    st.session_state['label_encoder'] = LabelEncoder().fit(df[target_col].values)
                     
                     # 构建 Pipeline
                     ms_pipeline = Pipeline(steps=[
                         ('imputer', SimpleImputer(strategy='median')), 
                         ('scaler', StandardScaler()), 
-                        ('feature_selector', MassSpecFeatureSelector(
-                            selection_method=sel_method,
-                            alpha=alpha_val,
-                            remove_redundant=True,
-                            corr_threshold=corr_thresh
-                        )),
-                        ('classifier', XGBClassifier(n_estimators=100, learning_rate=0.1, random_state=42, use_label_encoder=False, eval_metric='logloss')) 
+                        ('feature_selector', MassSpecFeatureSelector(selection_method=sel_method)),
+                        ('classifier', classifier_obj) 
                     ])
                     
-                    # 拟合与评估
+                    # 拟合与 CV
                     ms_pipeline.fit(X, y)
-                    scores = cross_val_score(ms_pipeline, X, y, cv=5)
-                    st.session_state['cv_score'] = np.mean(scores)
+                    st.session_state['cv_score'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5))
                     
-                    # 提取幸存特征与重要性
+                    # 提取特征
                     survived_indices = ms_pipeline.named_steps['feature_selector'].final_indices_
                     survived_features = np.array(feature_cols)[survived_indices]
-                    importances = ms_pipeline.named_steps['classifier'].feature_importances_
                     
-                    imp_df = pd.DataFrame({
-                        'Feature': survived_features,
-                        'Importance': importances
+                    # 智能化提取特征重要性
+                    if "XGBoost" in model_choice:
+                        importances = ms_pipeline.named_steps['classifier'].feature_importances_
+                    else:
+                        st.toast("正在通过置换算法解析 DNN 黑盒特征贡献度...", icon="🔍")
+                        # 截取分类器之前的数据管道，转换数据
+                        X_transformed = ms_pipeline[:-1].transform(X)
+                        # 计算置换重要性
+                        result = permutation_importance(ms_pipeline.named_steps['classifier'], X_transformed, y, n_repeats=5, random_state=42)
+                        importances = result.importances_mean
+                    
+                    st.session_state['feature_importance_df'] = pd.DataFrame({
+                        'Feature': survived_features, 'Importance': importances
                     }).sort_values(by='Importance', ascending=False)
                     
-                    # 保存至状态
-                    st.session_state['feature_importance_df'] = imp_df
                     st.session_state['trained_pipeline'] = ms_pipeline
+                    st.session_state['model_name'] = model_choice.split()[0]
                     st.session_state['model_trained'] = True
-                    
                     st.success("✅ 模型训练完成！")
                 except Exception as e:
-                    st.error(f"训练过程中发生错误: {e}")
+                    st.error(f"训练失败: {e}")
 
-    # --- 第四阶段：结果展示与下载 ---
+    # --- 第四阶段：结果 ---
     if st.session_state['model_trained']:
         st.divider()
-        st.header("📊 4. 训练结果与生物标志物鉴定")
+        st.header(f"📊 4. {st.session_state['model_name']} 训练结果")
+        st.metric(label="5-Fold Cross Validation Accuracy", value=f"{st.session_state['cv_score']:.2%}")
         
-        st.metric(label="XGBoost 模型交叉验证准确率 (5-Fold CV)", value=f"{st.session_state['cv_score']:.2%}")
-        
-        # 绘图
         df_plot = st.session_state['feature_importance_df']
-        top_n = min(20, len(df_plot))
-        
-        # ---------------- 解决中文乱码，改为国际化全英文排版 ----------------
         fig, ax = plt.subplots(figsize=(10, 8)) 
-        
-        sns.barplot(x='Importance', y='Feature', data=df_plot.head(top_n), palette='viridis', ax=ax)
-        
-        ax.set_title(f"Top {top_n} Biomarkers Feature Importance", fontsize=16, pad=15, fontweight='bold')
-        ax.set_xlabel("XGBoost Feature Weight / Importance Score", fontsize=12)
-        ax.set_ylabel("Metabolites / Features", fontsize=12)
-        
-        plt.subplots_adjust(left=0.4) # 防止代谢物名字太长被切掉
-        sns.despine()
-        st.pyplot(fig)
-        # --------------------------------------------------------------------
-        
-        # 打包供下一个页面使用的对象
-        model_package = {
-            'pipeline': st.session_state['trained_pipeline'],
-            'label_encoder': st.session_state['label_encoder']
-        }
+        sns.barplot(x='Importance', y='Feature', data=df_plot.head(20), palette='viridis', ax=ax)
+        ax.set_title(f"Top Biomarkers Importance ({st.session_state['model_name']})", fontsize=16, pad=15, fontweight='bold')
+        ax.set_xlabel("Feature Weight / Permutation Importance Score", fontsize=12)
+        plt.subplots_adjust(left=0.4); sns.despine(); st.pyplot(fig)
         
         buffer = io.BytesIO()
-        joblib.dump(model_package, buffer)
-        
+        joblib.dump({'pipeline': st.session_state['trained_pipeline'], 'label_encoder': st.session_state['label_encoder']}, buffer)
         st.download_button(
-            label="📥 下载已训练的智能核心 (.pkl)",
-            data=buffer.getvalue(),
-            file_name="shimadzu_xgboost_core.pkl",
-            mime="application/octet-stream",
-            help="包含所有的清洗规则、你的降维算法、XGBoost树结构以及标签解码器。可在【模型应用终端】直接加载预测。"
+            label=f"📥 下载智能核心 (.pkl)", data=buffer.getvalue(),
+            file_name=f"shimadzu_{st.session_state['model_name'].lower()}_core.pkl",
+            mime="application/octet-stream"
         )
