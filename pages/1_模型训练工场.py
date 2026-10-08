@@ -15,6 +15,7 @@ from sklearn.svm import SVC
 from sklearn.metrics import confusion_matrix, accuracy_score
 import joblib
 import io
+import datetime
 
 # 尝试导入我们之前写的特征筛选类
 try:
@@ -118,6 +119,12 @@ if st.session_state['data_loaded']:
     if len(feature_cols) != len(set(feature_cols)):
         st.error("❌ 发现重复的代谢物名称！请修改。"); health_issues += 1
 
+    # --- 智能感知数据体量 ---
+    n_samples = df.shape[0]
+    n_features = len(feature_cols)
+    is_small_sample = n_samples < 1000
+    is_high_dim = n_features > n_samples
+
     if health_issues == 0:
         temp_X = df[feature_cols].copy()
         missing_rate = temp_X.isna().sum().sum() / temp_X.size if temp_X.size > 0 else 0
@@ -130,44 +137,86 @@ if st.session_state['data_loaded']:
         with col_h2:
             if class_counts.min() < 3:
                 st.error("❌ 样本极度不平衡或类别过少！"); health_issues += 1
-            else: st.success("✅ 标签分布健康。")
+            else: st.success(f"✅ 标签分布健康 (当前为 {n_samples} 样本, {n_features} 原始特征)。")
 
-    with st.expander(f"⚙️ 打开 {model_choice.split()[0]} 超参数微调面板"):
-        tune_col1, tune_col2 = st.columns(2)
-        if "XGBoost" in model_choice:
-            with tune_col1:
-                xgb_n_estimators = st.slider("决策树数量", 50, 500, 100, step=50)
-                xgb_max_depth = st.slider("树的最大深度", 3, 15, 6)
-            with tune_col2:
-                xgb_lr = st.selectbox("学习率", [0.01, 0.05, 0.1, 0.2, 0.3], index=2)
-            classifier_obj = XGBClassifier(n_estimators=xgb_n_estimators, max_depth=xgb_max_depth, learning_rate=xgb_lr, random_state=42, eval_metric='logloss')
-            
-        elif "RandomForest" in model_choice:
-            with tune_col1:
-                rf_n_estimators = st.slider("森林中树的数量", 50, 500, 100, step=50)
-                rf_min_samples_split = st.slider("内部节点再划分最小样本数", 2, 10, 2)
-            with tune_col2:
-                rf_max_depth = st.selectbox("最大深度", ["None (不限制)", 5, 10, 20, 50], index=0)
+    # --- 数据感知型双层调参面板 ---
+    st.markdown("### ⚙️ 专家级超参数配置")
+    st.info("💡 系统已根据您上传的**特征/样本比例**自动为您预设了抗过拟合基准。您可在此基础上微调。")
+    
+    tune_tabs = st.tabs(["🎯 基础引擎动力 (Basic)", "🛡️ 高级抗过拟合装甲 (Advanced)"])
+    
+    if "XGBoost" in model_choice:
+        with tune_tabs[0]:
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                xgb_n_estimators = st.slider("树的数量 (n_estimators)", 50, 1000, 100 if is_small_sample else 300, step=50, help="迭代次数，树越多模型越复杂。大样本可适当增加。")
+                xgb_max_depth = st.slider("最大深度 (max_depth)", 3, 15, 6)
+            with col_b2:
+                xgb_lr = st.selectbox("学习率 (learning_rate)", [0.01, 0.05, 0.1, 0.2, 0.3], index=2 if is_small_sample else 1)
+        with tune_tabs[1]:
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                xgb_subsample = st.slider("行采样率 (subsample)", 0.5, 1.0, 0.8 if is_small_sample else 0.7, step=0.1, help="每棵树使用的样本比例，增加随机性防过拟合。")
+                xgb_colsample = st.slider("列采样率 (colsample_bytree)", 0.3, 1.0, 0.5 if is_high_dim else 0.8, step=0.1, help="高维特征(>100)强烈建议调低，避免模型过度依赖单一标志物。")
+            with col_a2:
+                xgb_alpha = st.slider("L1 正则化 (reg_alpha)", 0.0, 5.0, 0.1, step=0.1, help="产生稀疏模型，对抗高维度。")
+                xgb_lambda = st.slider("L2 正则化 (reg_lambda)", 0.0, 10.0, 1.0, step=0.5)
+        classifier_obj = XGBClassifier(n_estimators=xgb_n_estimators, max_depth=xgb_max_depth, learning_rate=xgb_lr, 
+                                       subsample=xgb_subsample, colsample_bytree=xgb_colsample, 
+                                       reg_alpha=xgb_alpha, reg_lambda=xgb_lambda,
+                                       random_state=42, eval_metric='logloss')
+        
+    elif "RandomForest" in model_choice:
+        with tune_tabs[0]:
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                rf_n_estimators = st.slider("森林规模 (n_estimators)", 50, 1000, 200 if is_small_sample else 500, step=50)
+            with col_b2:
+                rf_max_depth = st.selectbox("最大深度 (max_depth)", ["None (不限制)", 5, 10, 20, 30], index=1 if is_small_sample else 0)
                 rf_depth_val = None if rf_max_depth == "None (不限制)" else rf_max_depth
-            classifier_obj = RandomForestClassifier(n_estimators=rf_n_estimators, max_depth=rf_depth_val, min_samples_split=rf_min_samples_split, random_state=42)
+        with tune_tabs[1]:
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                rf_min_samples_split = st.slider("分裂最小样本数 (min_samples_split)", 2, 20, 2 if is_small_sample else 5)
+            with col_a2:
+                rf_min_samples_leaf = st.slider("叶节点最小样本数 (min_samples_leaf)", 1, 10, 1)
+        classifier_obj = RandomForestClassifier(n_estimators=rf_n_estimators, max_depth=rf_depth_val, 
+                                                min_samples_split=rf_min_samples_split, min_samples_leaf=rf_min_samples_leaf, random_state=42)
 
-        elif "SVM" in model_choice:
-            with tune_col1:
-                svm_C = st.selectbox("正则化参数 C", [0.1, 1.0, 10.0, 100.0], index=1)
-            with tune_col2:
-                svm_kernel = st.selectbox("核函数", ["rbf", "linear", "poly", "sigmoid"], index=0)
-            classifier_obj = SVC(C=svm_C, kernel=svm_kernel, probability=True, random_state=42)
+    elif "SVM" in model_choice:
+        with tune_tabs[0]:
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                svm_C = st.selectbox("正则化惩罚系数 (C)", [0.01, 0.1, 1.0, 10.0, 100.0], index=2, help="特征多时适当减小C，样本多时可增大C。")
+            with col_b2:
+                svm_kernel = st.selectbox("核函数 (Kernel)", ["linear", "rbf", "poly", "sigmoid"], index=0 if (is_high_dim and is_small_sample) else 1, help="小样本高维强烈首选 Linear 避免过拟合；大样本或低维选 RBF。")
+        with tune_tabs[1]:
+            st.info("RBF / Poly 核函数高级设定：")
+            svm_gamma = st.selectbox("Gamma (核函数系数)", ["scale", "auto", 0.001, 0.01, 0.1, 1.0], index=0, help="scale为自适应。特征多偏小，样本多更小以获得平滑边界。")
+        classifier_obj = SVC(C=svm_C, kernel=svm_kernel, gamma=svm_gamma, probability=True, random_state=42)
 
-        elif "DNN" in model_choice:
-            with tune_col1:
-                dnn_layers = st.text_input("隐藏层架构", "100, 50")
-                dnn_max_iter = st.slider("最大迭代轮数", 200, 2000, 500, step=100)
-            with tune_col2:
-                dnn_activation = st.selectbox("激活函数", ["relu", "tanh", "logistic"])
-                dnn_lr = st.selectbox("初始学习率", [0.001, 0.01, 0.05], index=0)
-            try: hidden_layer_sizes = tuple(int(x.strip()) for x in dnn_layers.split(','))
-            except: hidden_layer_sizes = (100, 50)
-            classifier_obj = MLPClassifier(hidden_layer_sizes=hidden_layer_sizes, activation=dnn_activation, learning_rate_init=dnn_lr, max_iter=dnn_max_iter, random_state=42)
+    elif "DNN" in model_choice:
+        with tune_tabs[0]:
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                dnn_layers = st.text_input("隐藏层架构 (用逗号分隔)", "64, 32" if is_small_sample else "128, 64")
+                dnn_max_iter = st.slider("最大迭代轮数 (max_iter)", 200, 2000, 500, step=100)
+            with col_b2:
+                dnn_activation = st.selectbox("激活函数 (activation)", ["relu", "tanh", "logistic"])
+                dnn_lr = st.selectbox("初始学习率 (learning_rate_init)", [1e-4, 1e-3, 1e-2], index=1)
+        with tune_tabs[1]:
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                dnn_alpha = st.selectbox("L2 正则化 / Weight Decay (alpha)", [1e-5, 1e-4, 1e-3, 1e-2, 0.1], index=2, help="代替Dropout抑制过拟合，小样本建议设置在 1e-3 ~ 1e-2。")
+            with col_a2:
+                dnn_batch = st.selectbox("批大小 (batch_size)", ["auto", 16, 32, 64, 128], index=1 if is_small_sample else 0)
+            st.warning("📌 **架构提示：** 受限于当前云端轻量化部署的服务器算力与依赖环境，DNN 引擎采用 L2 正则化作为 Dropout 技术的平替。若您需要完整的重型深度学习框架（如 PyTorch/TensorFlow）并在本地高性能工作站进行大规模组学训练，请询问岛津相关人员获取完整版的本地端部署代码。")
+            
+        try: hidden_layer_sizes = tuple(int(x.strip()) for x in dnn_layers.split(','))
+        except: hidden_layer_sizes = (64, 32)
+        classifier_obj = MLPClassifier(hidden_layer_sizes=hidden_layer_sizes, activation=dnn_activation, 
+                                       learning_rate_init=dnn_lr, max_iter=dnn_max_iter, alpha=dnn_alpha, 
+                                       batch_size=dnn_batch, random_state=42, early_stopping=True)
 
     st.divider()
     st.header("3. 训练与打包")
@@ -180,7 +229,6 @@ if st.session_state['data_loaded']:
                 for col in X_df.columns: X_df[col] = pd.to_numeric(X_df[col], errors='coerce') 
                 X = X_df.values
                 
-                # --- 标签编码记录 ---
                 le = LabelEncoder()
                 y = le.fit_transform(df[target_col].values)
                 st.session_state['label_encoder'] = le
@@ -195,7 +243,6 @@ if st.session_state['data_loaded']:
                 ms_pipeline.fit(X, y)
                 st.session_state['cv_score'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5))
                 
-                # --- 新增：直接在训练集上计算混淆矩阵 ---
                 y_pred_train = ms_pipeline.predict(X)
                 st.session_state['train_acc'] = accuracy_score(y, y_pred_train)
                 st.session_state['cm_train'] = confusion_matrix(y, y_pred_train)
@@ -206,7 +253,7 @@ if st.session_state['data_loaded']:
                 if model_name_short in ["XGBoost", "RandomForest"]:
                     importances = ms_pipeline.named_steps['classifier'].feature_importances_
                 else:
-                    st.toast(f"正在捕捉 {model_name_short} 预测概率微小下降计算贡献度...", icon="🔍")
+                    st.toast(f"正在捕捉 {model_name_short} 预测置信度计算特征贡献...", icon="🔍")
                     X_transformed = ms_pipeline[:-1].transform(X)
                     try:
                         result = permutation_importance(ms_pipeline.named_steps['classifier'], X_transformed, y, n_repeats=5, random_state=42, scoring='neg_log_loss')
@@ -222,6 +269,21 @@ if st.session_state['data_loaded']:
                     'Feature': survived_features, 'Importance': importances
                 }).sort_values(by='Importance', ascending=False)
                 
+                # --- 新增：自动生成论文可用的超参数日志 ---
+                final_params = ms_pipeline.named_steps['classifier'].get_params()
+                log_text = f"=========================================\n"
+                log_text += f" Shimadzu Clinical AI - Model Hyperparameters Log \n"
+                log_text += f"=========================================\n"
+                log_text += f"Date Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                log_text += f"Model Engine: {model_name_short}\n"
+                log_text += f"Input Matrix Size: {X.shape[0]} samples, {X.shape[1]} original features\n"
+                log_text += f"Features retained after Pre-screening: {len(survived_features)}\n\n"
+                log_text += f"--- Classifier Hyperparameters ---\n"
+                for param, val in final_params.items():
+                    log_text += f"- {param}: {val}\n"
+                log_text += f"\nNote: Preprocessing included Median Imputation and Standard Scaling (Z-score).\n"
+                st.session_state['param_log'] = log_text
+
                 st.session_state['trained_pipeline'] = ms_pipeline
                 st.session_state['model_name_short'] = model_name_short
                 st.session_state['model_trained'] = True
@@ -234,7 +296,6 @@ if st.session_state['data_loaded']:
         st.divider()
         st.header(f"📊 4. {st.session_state['model_name_short']} 训练结果分析")
         
-        # 将指标分列显示
         col_metric1, col_metric2 = st.columns(2)
         with col_metric1:
             st.metric(label="5-Fold Cross Validation Accuracy\n(五折交叉验证准确率 - 评估泛化能力)", 
@@ -243,9 +304,7 @@ if st.session_state['data_loaded']:
             st.metric(label="Training Set Accuracy\n(当前训练集回测拟合率)", 
                       value=f"{st.session_state['train_acc']:.2%}")
         
-        # 左右分栏：左边混淆矩阵，右边特征条形图
         col_plot1, col_plot2 = st.columns([1, 1.5])
-        
         with col_plot1:
             st.subheader("Training Set Confusion Matrix")
             st.markdown("**(模型对当前数据的“背题”情况)**")
@@ -253,8 +312,7 @@ if st.session_state['data_loaded']:
             le_classes = st.session_state['label_encoder'].classes_
             sns.heatmap(st.session_state['cm_train'], annot=True, fmt='d', cmap='Blues', ax=ax_cm,
                         xticklabels=le_classes, yticklabels=le_classes)
-            ax_cm.set_ylabel("True Label")
-            ax_cm.set_xlabel("Predicted Label")
+            ax_cm.set_ylabel("True Label"); ax_cm.set_xlabel("Predicted Label")
             st.pyplot(fig_cm)
             
         with col_plot2:
@@ -267,11 +325,24 @@ if st.session_state['data_loaded']:
             st.pyplot(fig_bar)
         
         st.divider()
+        st.header("📥 5. 导出核心资产与参数日志")
+        col_dl1, col_dl2 = st.columns(2)
+        
         buffer = io.BytesIO()
         joblib.dump({'pipeline': st.session_state['trained_pipeline'], 'label_encoder': st.session_state['label_encoder']}, buffer)
-        st.download_button(
-            label=f"📥 打包并下载 {st.session_state['model_name_short']} 智能核心 (.pkl) 供临床终端使用", 
-            data=buffer.getvalue(),
-            file_name=f"shimadzu_{st.session_state['model_name_short'].lower()}_core.pkl",
-            mime="application/octet-stream"
-        )
+        
+        with col_dl1:
+            st.download_button(
+                label=f"📦 打包下载智能核心 (.pkl) 供应用终端使用", 
+                data=buffer.getvalue(),
+                file_name=f"shimadzu_{st.session_state['model_name_short'].lower()}_core.pkl",
+                mime="application/octet-stream"
+            )
+        with col_dl2:
+            st.download_button(
+                label="📝 下载模型超参数日志 (SCI 论文 Methods 写作必备)", 
+                data=st.session_state['param_log'].encode('utf-8'),
+                file_name=f"{st.session_state['model_name_short']}_hyperparameters_log.txt",
+                mime="text/plain",
+                help="该日志提取自系统底层，包含最终确定的所有抗过拟合参数配置，可直接作为材料与方法补充。"
+            )
