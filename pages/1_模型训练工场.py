@@ -12,6 +12,7 @@ from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
+from sklearn.metrics import confusion_matrix, accuracy_score
 import joblib
 import io
 
@@ -178,8 +179,11 @@ if st.session_state['data_loaded']:
                 X_df = df[feature_cols].copy()
                 for col in X_df.columns: X_df[col] = pd.to_numeric(X_df[col], errors='coerce') 
                 X = X_df.values
-                y = LabelEncoder().fit_transform(df[target_col].values)
-                st.session_state['label_encoder'] = LabelEncoder().fit(df[target_col].values)
+                
+                # --- 标签编码记录 ---
+                le = LabelEncoder()
+                y = le.fit_transform(df[target_col].values)
+                st.session_state['label_encoder'] = le
                 
                 ms_pipeline = Pipeline(steps=[
                     ('imputer', SimpleImputer(strategy='median')), 
@@ -191,27 +195,28 @@ if st.session_state['data_loaded']:
                 ms_pipeline.fit(X, y)
                 st.session_state['cv_score'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5))
                 
+                # --- 新增：直接在训练集上计算混淆矩阵 ---
+                y_pred_train = ms_pipeline.predict(X)
+                st.session_state['train_acc'] = accuracy_score(y, y_pred_train)
+                st.session_state['cm_train'] = confusion_matrix(y, y_pred_train)
+                
                 survived_indices = ms_pipeline.named_steps['feature_selector'].final_indices_
                 survived_features = np.array(feature_cols)[survived_indices]
                 
-                # ---------------- 核心修复代码段 ----------------
                 if model_name_short in ["XGBoost", "RandomForest"]:
                     importances = ms_pipeline.named_steps['classifier'].feature_importances_
                 else:
                     st.toast(f"正在捕捉 {model_name_short} 预测概率微小下降计算贡献度...", icon="🔍")
                     X_transformed = ms_pipeline[:-1].transform(X)
                     try:
-                        # 修复1：使用 neg_log_loss 捕捉概率分布的微小变化，而不是僵硬的准确率
                         result = permutation_importance(ms_pipeline.named_steps['classifier'], X_transformed, y, n_repeats=5, random_state=42, scoring='neg_log_loss')
                         importances = np.abs(result.importances_mean)
                     except:
                         result = permutation_importance(ms_pipeline.named_steps['classifier'], X_transformed, y, n_repeats=5, random_state=42)
                         importances = np.abs(result.importances_mean)
                 
-                # 修复2：Min-Max 强制归一化到 0~1 的区间，确保无论数值多小，条形图都能完美按比例显示长度
                 if np.max(importances) > 0:
                     importances = (importances - np.min(importances)) / (np.max(importances) - np.min(importances) + 1e-9)
-                # ------------------------------------------------
                 
                 st.session_state['feature_importance_df'] = pd.DataFrame({
                     'Feature': survived_features, 'Importance': importances
@@ -224,26 +229,48 @@ if st.session_state['data_loaded']:
             except Exception as e:
                 st.error(f"训练失败: {e}")
 
-    # --- 第四阶段：结果 ---
+    # --- 第四阶段：结果展示 ---
     if st.session_state['model_trained']:
         st.divider()
-        st.header(f"📊 4. {st.session_state['model_name_short']} 训练结果与标志物鉴定")
-        st.metric(label="5-Fold Cross Validation Accuracy", value=f"{st.session_state['cv_score']:.2%}")
+        st.header(f"📊 4. {st.session_state['model_name_short']} 训练结果分析")
         
-        df_plot = st.session_state['feature_importance_df']
-        fig, ax = plt.subplots(figsize=(10, 8)) 
+        # 将指标分列显示
+        col_metric1, col_metric2 = st.columns(2)
+        with col_metric1:
+            st.metric(label="5-Fold Cross Validation Accuracy\n(五折交叉验证准确率 - 评估泛化能力)", 
+                      value=f"{st.session_state['cv_score']:.2%}")
+        with col_metric2:
+            st.metric(label="Training Set Accuracy\n(当前训练集回测拟合率)", 
+                      value=f"{st.session_state['train_acc']:.2%}")
         
-        sns.barplot(x='Importance', y='Feature', data=df_plot.head(20), palette='viridis', ax=ax)
-        ax.set_title(f"Top Biomarkers Relative Importance ({st.session_state['model_name_short']})", fontsize=16, pad=15, fontweight='bold')
-        ax.set_xlabel(f"{st.session_state['model_name_short']} Normalized Importance Score (0-1)", fontsize=12)
-        ax.set_ylabel("Metabolites / Features", fontsize=12)
+        # 左右分栏：左边混淆矩阵，右边特征条形图
+        col_plot1, col_plot2 = st.columns([1, 1.5])
         
-        plt.subplots_adjust(left=0.4); sns.despine(); st.pyplot(fig)
+        with col_plot1:
+            st.subheader("Training Set Confusion Matrix")
+            st.markdown("**(模型对当前数据的“背题”情况)**")
+            fig_cm, ax_cm = plt.subplots(figsize=(6, 5))
+            le_classes = st.session_state['label_encoder'].classes_
+            sns.heatmap(st.session_state['cm_train'], annot=True, fmt='d', cmap='Blues', ax=ax_cm,
+                        xticklabels=le_classes, yticklabels=le_classes)
+            ax_cm.set_ylabel("True Label")
+            ax_cm.set_xlabel("Predicted Label")
+            st.pyplot(fig_cm)
+            
+        with col_plot2:
+            st.subheader(f"Top Biomarkers Relative Importance")
+            df_plot = st.session_state['feature_importance_df']
+            fig_bar, ax_bar = plt.subplots(figsize=(10, 8)) 
+            sns.barplot(x='Importance', y='Feature', data=df_plot.head(20), palette='viridis', ax=ax_bar)
+            ax_bar.set_xlabel(f"{st.session_state['model_name_short']} Normalized Score (0-1)", fontsize=12)
+            plt.subplots_adjust(left=0.4); sns.despine()
+            st.pyplot(fig_bar)
         
+        st.divider()
         buffer = io.BytesIO()
         joblib.dump({'pipeline': st.session_state['trained_pipeline'], 'label_encoder': st.session_state['label_encoder']}, buffer)
         st.download_button(
-            label=f"📥 下载 {st.session_state['model_name_short']} 智能核心 (.pkl)", 
+            label=f"📥 打包并下载 {st.session_state['model_name_short']} 智能核心 (.pkl) 供临床终端使用", 
             data=buffer.getvalue(),
             file_name=f"shimadzu_{st.session_state['model_name_short'].lower()}_core.pkl",
             mime="application/octet-stream"
