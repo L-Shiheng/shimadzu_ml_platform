@@ -59,12 +59,12 @@ except ImportError:
             return X.values[:, self.final_indices_] if hasattr(X, 'values') else X[:, self.final_indices_]
 
 # --- 页面初始化与状态管理 ---
-st.set_page_config(page_title="代谢组学机器学习建模平台", page_icon="📊", layout="wide")
+st.set_page_config(page_title="机器学习建模平台", page_icon="📊", layout="wide")
 
 for key in ['data_loaded', 'model_trained', 'trained_pipeline', 'df_raw']:
     if key not in st.session_state: st.session_state[key] = None if key in ['trained_pipeline', 'df_raw'] else False
 
-st.title("📊 代谢组学机器学习建模平台")
+st.title("📊 机器学习建模平台")
 
 with st.expander("📖 数据格式与准备规范指南", expanded=False):
     st.info("💡 **系统要求：** 数据矩阵需以【行】为样本观测值，以【列】为代谢物特征变量。数据须包含用于监督学习的【分类标签（如组别）】。")
