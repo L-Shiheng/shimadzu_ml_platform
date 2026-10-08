@@ -59,26 +59,26 @@ except ImportError:
             return X.values[:, self.final_indices_] if hasattr(X, 'values') else X[:, self.final_indices_]
 
 # --- 页面初始化与状态管理 ---
-st.set_page_config(page_title="机器学习建模平台", page_icon="📊", layout="wide")
+st.set_page_config(page_title="组学与临床数据机器学习建模平台", page_icon="📊", layout="wide")
 
 for key in ['data_loaded', 'model_trained', 'trained_pipeline', 'df_raw']:
     if key not in st.session_state: st.session_state[key] = None if key in ['trained_pipeline', 'df_raw'] else False
 
-st.title("📊 机器学习建模平台")
+st.title("📊 组学与临床数据机器学习建模平台")
 
 with st.expander("📖 数据格式与准备规范指南", expanded=False):
-    st.info("💡 **系统要求：** 数据矩阵需以【行】为样本观测值，以【列】为代谢物特征变量。数据须包含用于监督学习的【分类标签（如组别）】。")
+    st.info("💡 **系统要求：** 数据矩阵需以【行】为样本观测值，以【列】为特征变量（代谢物、基因或临床生化指标）。数据须包含用于监督学习的【分类标签（如组别）】。")
     template_df = pd.DataFrame({
         "Sample_ID": ["S_001", "S_002", "S_003", "..."],
         "Group": ["Healthy", "Disease_A", "Healthy", "..."],
-        "Metabolite_1": [1024.5, 453.2, 980.1, "..."],
-        "Metabolite_N": ["...", "...", "...", "..."]
+        "Feature_1": [1024.5, 453.2, 980.1, "..."],
+        "Feature_N": ["...", "...", "...", "..."]
     })
     st.write(template_df)
 
 # --- 第一阶段：数据上传 ---
 st.header("1. 导入特征矩阵数据")
-uploaded_file = st.file_uploader("请上传待分析的组学数据集 (支持 .csv 或 .xlsx 格式)", type=['csv', 'xlsx'])
+uploaded_file = st.file_uploader("请上传待分析的数据集 (支持 .csv 或 .xlsx 格式)", type=['csv', 'xlsx'])
 
 if uploaded_file is not None:
     try:
@@ -107,7 +107,7 @@ if st.session_state['data_loaded']:
             "XGBoost (极限梯度提升树)", 
             "RandomForest (随机森林)",
             "SVM (支持向量机)",
-            "DNN (深度神经网络)"
+            "MLP (多层感知机 / 神经网络)"
         ])
         sel_method = st.selectbox("前置统计学特征筛选方法", ['fdr', 'kbest', 'fwe'], index=0)
 
@@ -119,7 +119,6 @@ if st.session_state['data_loaded']:
     if len(feature_cols) != len(set(feature_cols)):
         st.error("❌ 错误：检测到重复的特征列名，违反算法矩阵输入要求，请修正数据源。"); health_issues += 1
 
-    # --- 智能感知数据体量 ---
     n_samples = df.shape[0]
     n_features = len(feature_cols)
     is_small_sample = n_samples < 1000
@@ -139,7 +138,7 @@ if st.session_state['data_loaded']:
                 st.error("❌ 错误：类别间样本分布极度失衡或单类样本不足以支持交叉验证。"); health_issues += 1
             else: st.success(f"✅ 样本分布评估通过 (当前数据形态: {n_samples} 样本, {n_features} 原始特征)。")
 
-# --- 数据感知型双层调参面板 ---
+    # --- 数据感知型双层调参面板 ---
     st.markdown("### ⚙️ 模型超参数配置 (Hyperparameters Tuning)")
     st.info("💡 提示：系统已基于当前数据集的特征/样本量比值 ($p/n$) 自动预设了适用的正则化基准。支持自定义微调。")
     
@@ -158,11 +157,9 @@ if st.session_state['data_loaded']:
             with col_a1:
                 xgb_subsample = st.slider("样本行采样率 (subsample)", 0.5, 1.0, 0.8 if is_small_sample else 0.7, step=0.1, help="引入随机性以降低方差。")
                 xgb_colsample = st.slider("特征列采样率 (colsample_bytree)", 0.3, 1.0, 0.5 if is_high_dim else 0.8, step=0.1, help="在高维数据中降低此值可迫使模型评估次要特征，避免严重过拟合。")
-                # 🌟 新增：表格中的 XGBoost gamma (最小分裂损失)
                 xgb_gamma = st.slider("最小分裂损失 (gamma)", 0.0, 10.0, 0.0, step=0.5, help="节点分裂所需的最小损失减少值，值越大模型越保守。")
             with col_a2:
                 xgb_alpha = st.slider("L1 正则化系数 (reg_alpha)", 0.0, 5.0, 0.1, step=0.1, help="促使特征权重稀疏化，适合高维空间特征选择。")
-                # 🌟 修正：将 L2 正则化的上限拉高到 20.0，贴合表格设定
                 xgb_lambda = st.slider("L2 正则化系数 (reg_lambda)", 0.0, 20.0, 1.0, step=0.5, help="对叶子权重进行L2惩罚，防止权重过大。")
         classifier_obj = XGBClassifier(n_estimators=xgb_n_estimators, max_depth=xgb_max_depth, learning_rate=xgb_lr, 
                                        subsample=xgb_subsample, colsample_bytree=xgb_colsample, 
@@ -195,11 +192,10 @@ if st.session_state['data_loaded']:
                 svm_kernel = st.selectbox("核函数类型 (Kernel)", ["linear", "rbf", "poly", "sigmoid"], index=0 if (is_high_dim and is_small_sample) else 1, help="高维小样本情形下推荐线性核 (Linear) 避免过拟合；非线性边界需求可选用 RBF。")
         with tune_tabs[1]:
             st.info("RBF / Poly 核函数参数设定：")
-            # 🌟 修正：加入了 1e-4 (0.0001) 选项，完全覆盖表格范围
-            svm_gamma = st.selectbox("核函数映射系数 (Gamma)", ["scale", "auto", 0.0001, 0.001, 0.01, 0.1, 1.0], index=0, help="初始值 = 1/n_features。特征多时偏向下端，样本多时可尝试更小值以获得平滑边界。")
+            svm_gamma = st.selectbox("核函数映射系数 (Gamma)", ["scale", "auto", 0.0001, 0.001, 0.01, 0.1, 1.0], index=0, help="决定单样本的影响范围，规模较小有助于获得平滑边界。")
         classifier_obj = SVC(C=svm_C, kernel=svm_kernel, gamma=svm_gamma, probability=True, random_state=42)
 
-    elif "DNN" in model_choice:
+    elif "MLP" in model_choice:
         with tune_tabs[0]:
             col_b1, col_b2 = st.columns(2)
             with col_b1:
@@ -213,7 +209,6 @@ if st.session_state['data_loaded']:
             with col_a1:
                 dnn_alpha = st.selectbox("L2 权重衰减惩罚 (Weight Decay/alpha)", [1e-5, 1e-4, 1e-3, 1e-2, 0.1], index=2, help="在 Scikit-learn 轻量化架构中作为 Dropout 技术的等效平替方案。组学小样本建议设置为 1e-3 ~ 1e-2。")
             with col_a2:
-                # 🌟 修正：拓展 batch_size 到 256 和 512，适配万级样本
                 dnn_batch = st.selectbox("小批量规模 (batch_size)", ["auto", 16, 32, 64, 128, 256, 512], index=1 if is_small_sample else 0)
             st.warning("📌 **关于深度学习环境的声明：** 鉴于 Web 端服务器运行内存与依赖包体积约束，本平台采用 Scikit-learn 的多层感知机 (MLP) 作为轻量级验证方案，并以 L2 权重衰减作为泛化约束。若用户旨在进行超大规模队列模型训练并完整应用如 Dropout 等深度学习原生存组件，建议基于 PyTorch/TensorFlow 框架进行本地高性能工作站部署。如有需要可向岛津支持团队索取进阶版部署脚本。")
             
@@ -307,6 +302,24 @@ if st.session_state['data_loaded']:
         with col_metric2:
             st.metric(label="内部拟合精度\n(Training Set Accuracy)", 
                       value=f"{st.session_state['train_acc']:.2%}")
+                      
+        # --- 🌟 新增：AI 拟合状态智能诊断 ---
+        st.markdown("#### 🩺 AI 拟合状态智能诊断")
+        acc_train = st.session_state['train_acc']
+        acc_cv = st.session_state['cv_score']
+        diff = acc_train - acc_cv
+        
+        if acc_train < 0.70 and acc_cv < 0.70:
+            st.warning("⚠️ **诊断结论：检测到欠拟合 (Underfitting) 风险。** 模型未能充分捕捉数据规律，在训练集本身表现即不佳。建议检查特征质量、放宽正则化参数，或尝试其他非线性核心算法。")
+        elif diff > 0.15:
+            st.error(f"⚠️ **诊断结论：检测到显著的过拟合 (High Overfitting) 风险。** 内部拟合精度比泛化能力高出 {diff:.1%}，模型存在严重的“死记硬背”现象，应用于未知样本时表现可能崩塌。请前往【高级面板】调小树深 (max_depth) 或增加 L1/L2 正则化系数。")
+        elif diff > 0.08:
+            st.warning(f"⚠️ **诊断结论：存在轻微过拟合趋势。** 内部拟合精度比泛化能力高出 {diff:.1%}。若泛化评估已达临床要求可忽略；若仍需优化，可尝试适度调低特征列采样率 (colsample_bytree)。")
+        elif acc_cv >= 0.75:
+            st.success("✅ **诊断结论：模型拟合状态极佳 (Optimal Fit)。** 兼具高精度与优秀的泛化能力，未出现明显的数据过拟合迹象。当前模型极其健康，可直接导出并应用于下阶段的临床盲测与验证。")
+        else:
+            st.info("ℹ️ **诊断结论：模型状态正常。** 未见严重过拟合，但整体预测精度仍有提升空间。建议补充高质量特征或扩大队列样本量。")
+        st.write("---")
         
         col_plot1, col_plot2 = st.columns([1, 1.5])
         with col_plot1:
