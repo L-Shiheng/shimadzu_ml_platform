@@ -139,7 +139,7 @@ if st.session_state['data_loaded']:
                 st.error("❌ 错误：类别间样本分布极度失衡或单类样本不足以支持交叉验证。"); health_issues += 1
             else: st.success(f"✅ 样本分布评估通过 (当前数据形态: {n_samples} 样本, {n_features} 原始特征)。")
 
-    # --- 数据感知型双层调参面板 ---
+# --- 数据感知型双层调参面板 ---
     st.markdown("### ⚙️ 模型超参数配置 (Hyperparameters Tuning)")
     st.info("💡 提示：系统已基于当前数据集的特征/样本量比值 ($p/n$) 自动预设了适用的正则化基准。支持自定义微调。")
     
@@ -158,12 +158,15 @@ if st.session_state['data_loaded']:
             with col_a1:
                 xgb_subsample = st.slider("样本行采样率 (subsample)", 0.5, 1.0, 0.8 if is_small_sample else 0.7, step=0.1, help="引入随机性以降低方差。")
                 xgb_colsample = st.slider("特征列采样率 (colsample_bytree)", 0.3, 1.0, 0.5 if is_high_dim else 0.8, step=0.1, help="在高维数据中降低此值可迫使模型评估次要特征，避免严重过拟合。")
+                # 🌟 新增：表格中的 XGBoost gamma (最小分裂损失)
+                xgb_gamma = st.slider("最小分裂损失 (gamma)", 0.0, 10.0, 0.0, step=0.5, help="节点分裂所需的最小损失减少值，值越大模型越保守。")
             with col_a2:
                 xgb_alpha = st.slider("L1 正则化系数 (reg_alpha)", 0.0, 5.0, 0.1, step=0.1, help="促使特征权重稀疏化，适合高维空间特征选择。")
-                xgb_lambda = st.slider("L2 正则化系数 (reg_lambda)", 0.0, 10.0, 1.0, step=0.5)
+                # 🌟 修正：将 L2 正则化的上限拉高到 20.0，贴合表格设定
+                xgb_lambda = st.slider("L2 正则化系数 (reg_lambda)", 0.0, 20.0, 1.0, step=0.5, help="对叶子权重进行L2惩罚，防止权重过大。")
         classifier_obj = XGBClassifier(n_estimators=xgb_n_estimators, max_depth=xgb_max_depth, learning_rate=xgb_lr, 
                                        subsample=xgb_subsample, colsample_bytree=xgb_colsample, 
-                                       reg_alpha=xgb_alpha, reg_lambda=xgb_lambda,
+                                       reg_alpha=xgb_alpha, reg_lambda=xgb_lambda, gamma=xgb_gamma,
                                        random_state=42, eval_metric='logloss')
         
     elif "RandomForest" in model_choice:
@@ -192,7 +195,8 @@ if st.session_state['data_loaded']:
                 svm_kernel = st.selectbox("核函数类型 (Kernel)", ["linear", "rbf", "poly", "sigmoid"], index=0 if (is_high_dim and is_small_sample) else 1, help="高维小样本情形下推荐线性核 (Linear) 避免过拟合；非线性边界需求可选用 RBF。")
         with tune_tabs[1]:
             st.info("RBF / Poly 核函数参数设定：")
-            svm_gamma = st.selectbox("核函数映射系数 (Gamma)", ["scale", "auto", 0.001, 0.01, 0.1, 1.0], index=0, help="决定单样本的影响范围，规模较小有助于获得平滑边界。")
+            # 🌟 修正：加入了 1e-4 (0.0001) 选项，完全覆盖表格范围
+            svm_gamma = st.selectbox("核函数映射系数 (Gamma)", ["scale", "auto", 0.0001, 0.001, 0.01, 0.1, 1.0], index=0, help="初始值 = 1/n_features。特征多时偏向下端，样本多时可尝试更小值以获得平滑边界。")
         classifier_obj = SVC(C=svm_C, kernel=svm_kernel, gamma=svm_gamma, probability=True, random_state=42)
 
     elif "DNN" in model_choice:
@@ -209,7 +213,8 @@ if st.session_state['data_loaded']:
             with col_a1:
                 dnn_alpha = st.selectbox("L2 权重衰减惩罚 (Weight Decay/alpha)", [1e-5, 1e-4, 1e-3, 1e-2, 0.1], index=2, help="在 Scikit-learn 轻量化架构中作为 Dropout 技术的等效平替方案。组学小样本建议设置为 1e-3 ~ 1e-2。")
             with col_a2:
-                dnn_batch = st.selectbox("小批量规模 (batch_size)", ["auto", 16, 32, 64, 128], index=1 if is_small_sample else 0)
+                # 🌟 修正：拓展 batch_size 到 256 和 512，适配万级样本
+                dnn_batch = st.selectbox("小批量规模 (batch_size)", ["auto", 16, 32, 64, 128, 256, 512], index=1 if is_small_sample else 0)
             st.warning("📌 **关于深度学习环境的声明：** 鉴于 Web 端服务器运行内存与依赖包体积约束，本平台采用 Scikit-learn 的多层感知机 (MLP) 作为轻量级验证方案，并以 L2 权重衰减作为泛化约束。若用户旨在进行超大规模队列模型训练并完整应用如 Dropout 等深度学习原生存组件，建议基于 PyTorch/TensorFlow 框架进行本地高性能工作站部署。如有需要可向岛津支持团队索取进阶版部署脚本。")
             
         try: hidden_layer_sizes = tuple(int(x.strip()) for x in dnn_layers.split(','))
