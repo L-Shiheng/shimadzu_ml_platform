@@ -68,7 +68,7 @@ for key in ['data_loaded', 'model_trained', 'trained_pipeline', 'df_raw']:
 if 'roc_history' not in st.session_state:
     st.session_state['roc_history'] = []
 
-st.title("📊 组学与临床数据机器学习建模平台")
+st.title("📊 多维数据模型构建与验证")
 
 with st.expander("📖 数据格式说明与准备规范", expanded=False):
     st.info("💡 **矩阵格式要求：** 数据需以【行】为观测样本，【列】为特征变量（代谢物、基因表达量或临床指标）。数据集中必须包含用于监督学习的【类别标签】列。")
