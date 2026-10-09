@@ -5,14 +5,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder, label_binarize
 from sklearn.model_selection import cross_val_score
 from sklearn.inspection import permutation_importance
 from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
-from sklearn.metrics import confusion_matrix, accuracy_score, roc_curve, auc, roc_auc_score
+from sklearn.metrics import confusion_matrix, accuracy_score, roc_curve, auc
 import joblib
 import io
 import datetime
@@ -63,6 +63,10 @@ st.set_page_config(page_title="组学与临床数据机器学习建模平台", p
 
 for key in ['data_loaded', 'model_trained', 'trained_pipeline', 'df_raw']:
     if key not in st.session_state: st.session_state[key] = None if key in ['trained_pipeline', 'df_raw'] else False
+
+# 🌟 新增：ROC 曲线对比记忆库
+if 'roc_history' not in st.session_state:
+    st.session_state['roc_history'] = []
 
 st.title("📊 组学与临床数据机器学习建模平台")
 
@@ -244,7 +248,7 @@ if st.session_state['data_loaded']:
     st.header("3. 模型训练与序列化封装")
     model_name_short = model_choice.split()[0]
     
-    if st.button(f"🚀 启动训练并导出模型 ({model_name_short})", type="primary", disabled=(health_issues > 0)):
+    if st.button(f"🚀 启动训练 ({model_name_short})", type="primary", disabled=(health_issues > 0)):
         with st.spinner(f"正在执行矩阵预处理、降维及 {model_name_short} 算法训练..."):
             try:
                 X_df = df[feature_cols].copy()
@@ -263,18 +267,10 @@ if st.session_state['data_loaded']:
                     ('classifier', classifier_obj) 
                 ])
                 
-                # --- CV 准确率评估 ---
+                # --- CV 准确率与预测 ---
                 ms_pipeline.fit(X, y)
                 st.session_state['cv_score'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5))
                 
-                # --- CV AUC 评估 (SCI 发文金标准) ---
-                try:
-                    scoring_auc = 'roc_auc_ovr' if is_multiclass else 'roc_auc'
-                    st.session_state['cv_auc'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5, scoring=scoring_auc))
-                except:
-                    st.session_state['cv_auc'] = np.nan
-                
-                # --- 内部拟合与预测概率获取 ---
                 y_pred_train = ms_pipeline.predict(X)
                 y_prob_train = ms_pipeline.predict_proba(X)
                 
@@ -283,10 +279,22 @@ if st.session_state['data_loaded']:
                 st.session_state['y_train_true'] = y
                 st.session_state['y_prob_train'] = y_prob_train
                 
+                # 🌟 统一计算当前 ROC 核心数据以备提取
+                if is_multiclass:
+                    y_true_bin = label_binarize(y, classes=range(len(le.classes_)))
+                    fpr_curr, tpr_curr, _ = roc_curve(y_true_bin.ravel(), y_prob_train.ravel())
+                    auc_curr = auc(fpr_curr, tpr_curr)
+                    st.session_state['cv_auc'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5, scoring='roc_auc_ovr'))
+                else:
+                    fpr_curr, tpr_curr, _ = roc_curve(y, y_prob_train[:, 1])
+                    auc_curr = auc(fpr_curr, tpr_curr)
+                    st.session_state['cv_auc'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5, scoring='roc_auc'))
+                
+                st.session_state['current_roc_data'] = {'fpr': fpr_curr, 'tpr': tpr_curr, 'auc': auc_curr}
+
                 survived_indices = ms_pipeline.named_steps['feature_selector'].final_indices_
                 survived_features = np.array(feature_cols)[survived_indices]
                 
-                # --- 特征贡献度计算 ---
                 if model_name_short in ["XGBoost", "RandomForest"]:
                     importances = ms_pipeline.named_steps['classifier'].feature_importances_
                 else:
@@ -310,15 +318,11 @@ if st.session_state['data_loaded']:
                 log_text = f"=========================================\n"
                 log_text += f" Shimadzu Clinical Omics - Model Parameters Log \n"
                 log_text += f"=========================================\n"
-                log_text += f"Generation Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 log_text += f"Algorithm Engine: {model_name_short}\n"
-                log_text += f"Input Matrix Demographics: {X.shape[0]} Observations, {X.shape[1]} Raw Features\n"
-                log_text += f"Class Imbalance Handling: Enabled (if applicable)\n"
-                log_text += f"Features Retained Post-screening ({sel_method}): {len(survived_features)}\n\n"
-                log_text += f"--- Classifier Hyperparameter Configuration ---\n"
+                log_text += f"Input Matrix: {X.shape[0]} Observations, {X.shape[1]} Raw Features\n"
+                log_text += f"Features Retained Post-screening: {len(survived_features)}\n\n"
                 for param, val in final_params.items():
                     log_text += f"- {param}: {val}\n"
-                log_text += f"\nNote: Standard pipeline executed including Median Imputation and Z-score Scaling.\n"
                 st.session_state['param_log'] = log_text
 
                 st.session_state['trained_pipeline'] = ms_pipeline
@@ -328,51 +332,30 @@ if st.session_state['data_loaded']:
             except Exception as e:
                 st.error(f"建模异常终止: {e}")
 
-    # --- 第四阶段：结果展示 ---
+    # --- 第四阶段：结果展示与多线 ROC 提取 ---
     if st.session_state['model_trained']:
         st.divider()
         st.header(f"📊 4. 模型诊断与关键生物学变量解析")
         
-        # 🌟 指标看板升级：加入 AUC
+        # 指标看板
         col_metric1, col_metric2, col_metric3 = st.columns(3)
         with col_metric1:
-            st.metric(label="5-Fold Cross Validation Accuracy\n(泛化精度 - 内部验证)", 
-                      value=f"{st.session_state['cv_score']:.2%}")
+            st.metric(label="5-Fold CV Accuracy\n(泛化精度 - 内部验证)", value=f"{st.session_state['cv_score']:.2%}")
         with col_metric2:
             auc_val = st.session_state['cv_auc']
-            auc_str = f"{auc_val:.3f}" if not np.isnan(auc_val) else "N/A"
-            st.metric(label="5-Fold CV AUC Score\n(ROC曲线下面积 - 诊断金标准)", 
-                      value=auc_str)
+            st.metric(label="5-Fold CV AUC Score\n(ROC曲线下面积)", value=f"{auc_val:.3f}" if not np.isnan(auc_val) else "N/A")
         with col_metric3:
-            st.metric(label="Training Set Accuracy\n(内部拟合精度 - 过拟合参考)", 
-                      value=f"{st.session_state['train_acc']:.2%}")
-                      
-        st.markdown("#### 🩺 AI 拟合状态智能诊断")
-        acc_train = st.session_state['train_acc']
-        acc_cv = st.session_state['cv_score']
-        diff = acc_train - acc_cv
-        
-        if acc_train < 0.70 and acc_cv < 0.70:
-            st.warning("⚠️ **诊断结论：检测到欠拟合 (Underfitting) 风险。** 模型未能充分捕捉数据规律，在训练集本身表现即不佳。建议检查特征质量、放宽正则化参数，或尝试其他核心算法。")
-        elif diff > 0.15:
-            st.error(f"⚠️ **诊断结论：检测到显著的过拟合 (High Overfitting) 风险。** 内部精度比泛化能力高出 {diff:.1%}，模型严重“死记硬背”，未知样本表现堪忧。请前往【高级面板】调小树深或增加正则化系数。")
-        elif diff > 0.08:
-            st.warning(f"⚠️ **诊断结论：存在轻微过拟合趋势。** 内部精度高出泛化能力 {diff:.1%}。若泛化评估已达临床要求可忽略；若仍需优化，可尝试适度调低特征列采样率。")
-        elif acc_cv >= 0.75:
-            st.success("✅ **诊断结论：模型拟合状态极佳 (Optimal Fit)。** 兼具高精度与优秀的泛化能力。当前模型极其健康，可直接导出并应用于下阶段的临床盲测与验证。")
-        else:
-            st.info("ℹ️ **诊断结论：模型状态正常。** 未见严重过拟合，但整体诊断效能仍有提升空间。建议补充高质量特征或扩大队列样本量。")
+            st.metric(label="Training Set Accuracy\n(内部拟合精度)", value=f"{st.session_state['train_acc']:.2%}")
         st.write("---")
         
-        # 🌟 图像布局升级：三列展示（混淆矩阵、ROC 曲线、特征重要性）
+        # 图像布局
         col_plot1, col_plot2, col_plot3 = st.columns([1, 1, 1.2])
         
         with col_plot1:
             st.subheader("Training Confusion Matrix")
             fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
             le_classes = st.session_state['label_encoder'].classes_
-            sns.heatmap(st.session_state['cm_train'], annot=True, fmt='d', cmap='Blues', ax=ax_cm,
-                        xticklabels=le_classes, yticklabels=le_classes)
+            sns.heatmap(st.session_state['cm_train'], annot=True, fmt='d', cmap='Blues', ax=ax_cm, xticklabels=le_classes, yticklabels=le_classes)
             ax_cm.set_ylabel("True Label"); ax_cm.set_xlabel("Predicted Label")
             st.pyplot(fig_cm)
             
@@ -381,16 +364,13 @@ if st.session_state['data_loaded']:
             fig_roc, ax_roc = plt.subplots(figsize=(5, 4))
             y_true = st.session_state['y_train_true']
             y_prob = st.session_state['y_prob_train']
-            
             if len(le_classes) == 2:
                 fpr, tpr, _ = roc_curve(y_true, y_prob[:, 1])
-                roc_auc = auc(fpr, tpr)
-                ax_roc.plot(fpr, tpr, color='#01579B', lw=2, label=f'ROC (AUC = {roc_auc:.3f})')
+                ax_roc.plot(fpr, tpr, color='#01579B', lw=2, label=f'ROC (AUC = {auc(fpr, tpr):.3f})')
             else:
                 for i, color in zip(range(len(le_classes)), sns.color_palette("husl", len(le_classes))):
                     fpr, tpr, _ = roc_curve(y_true == i, y_prob[:, i])
-                    ax_roc.plot(fpr, tpr, color=color, lw=2, label=f'{le_classes[i]} (AUC = {auc(fpr, tpr):.2f})')
-            
+                    ax_roc.plot(fpr, tpr, color=color, lw=2, label=f'{le_classes[i]} (AUC={auc(fpr, tpr):.2f})')
             ax_roc.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
             ax_roc.set_xlabel('False Positive Rate'); ax_roc.set_ylabel('True Positive Rate')
             ax_roc.legend(loc="lower right", fontsize=8)
@@ -401,41 +381,66 @@ if st.session_state['data_loaded']:
             df_plot = st.session_state['feature_importance_df']
             fig_bar, ax_bar = plt.subplots(figsize=(6, 5)) 
             sns.barplot(x='Importance', y='Feature', data=df_plot.head(15), palette='viridis', ax=ax_bar)
-            ax_bar.set_xlabel(f"Normalized Score (0-1)", fontsize=10)
-            ax_bar.set_ylabel("")
+            ax_bar.set_xlabel(f"Normalized Score (0-1)", fontsize=10); ax_bar.set_ylabel("")
             plt.subplots_adjust(left=0.3); sns.despine()
             st.pyplot(fig_bar)
+
+        # 🌟 核心杀手锏：多线 ROC 提取面板 
+        st.markdown("### 🏆 临床发文级：多模型 ROC 曲线看板")
+        st.info("💡 如果您对当前的参数调试结果满意，可将其提取至下方的对比看板。切换不同模型反复提取，即可生成多线同框的顶级 SCI 图表。")
         
+        col_roc1, col_roc2, col_roc3 = st.columns([2, 1, 1])
+        with col_roc1:
+            custom_curve_name = st.text_input("为当前模型打上标签：", value=f"{st.session_state['model_name_short']} (AUC={st.session_state['current_roc_data']['auc']:.3f})")
+        with col_roc2:
+            st.write("") # 占位对齐
+            if st.button("➕ 提取当前曲线至看板", type="primary"):
+                # 存入 session_state 的记忆库
+                st.session_state['roc_history'].append({
+                    'name': custom_curve_name,
+                    'fpr': st.session_state['current_roc_data']['fpr'],
+                    'tpr': st.session_state['current_roc_data']['tpr'],
+                    'auc': st.session_state['current_roc_data']['auc']
+                })
+                st.rerun()
+        with col_roc3:
+            st.write("") 
+            if st.button("🗑️ 清空对比看板") and len(st.session_state['roc_history']) > 0:
+                st.session_state['roc_history'] = []
+                st.rerun()
+                
+        # 渲染多线同框图
+        if len(st.session_state['roc_history']) > 0:
+            st.markdown("#### 综合诊断效能基准对比 (Benchmark)")
+            fig_multi, ax_multi = plt.subplots(figsize=(8, 6))
+            colors = sns.color_palette("Set1", n_colors=max(10, len(st.session_state['roc_history'])))
+            
+            for idx, roc_obj in enumerate(st.session_state['roc_history']):
+                ax_multi.plot(roc_obj['fpr'], roc_obj['tpr'], color=colors[idx], lw=2, 
+                              label=f"{roc_obj['name']}")
+                
+            ax_multi.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
+            ax_multi.set_xlabel('False Positive Rate (1 - Specificity)', fontsize=12)
+            ax_multi.set_ylabel('True Positive Rate (Sensitivity)', fontsize=12)
+            ax_multi.set_title('Multi-Model ROC Curve Comparison', fontsize=14)
+            ax_multi.legend(loc="lower right", fontsize=10)
+            sns.despine()
+            
+            # 居中展示
+            col_chart_left, col_chart_mid, col_chart_right = st.columns([1, 2, 1])
+            with col_chart_mid:
+                st.pyplot(fig_multi)
+
         st.divider()
         st.header("📥 5. 核心资产输出与科研通路分析接口")
-        # 🌟 导出区域升级：增加完整标志物清单的 CSV 导出
         col_dl1, col_dl2, col_dl3 = st.columns(3)
-        
         buffer = io.BytesIO()
         joblib.dump({'pipeline': st.session_state['trained_pipeline'], 'label_encoder': st.session_state['label_encoder']}, buffer)
         
         with col_dl1:
-            st.download_button(
-                label=f"📦 下载算法序列化模型 (.pkl)", 
-                data=buffer.getvalue(),
-                file_name=f"shimadzu_{st.session_state['model_name_short'].lower()}_model.pkl",
-                mime="application/octet-stream",
-                help="直接应用于【第 2 页 模型应用终端】，对全新临床队列进行独立盲测并生成 SHAP 报告。"
-            )
+            st.download_button(label=f"📦 下载算法序列化模型 (.pkl)", data=buffer.getvalue(), file_name=f"shimadzu_model.pkl", mime="application/octet-stream")
         with col_dl2:
-            st.download_button(
-                label="📝 下载模型超参数日志 (.txt)", 
-                data=st.session_state['param_log'].encode('utf-8'),
-                file_name=f"{st.session_state['model_name_short']}_hyperparameters_log.txt",
-                mime="text/plain",
-                help="SCI 论文 Methods 写作必备：记录模型训练的底层配置方案以备审稿复现验证。"
-            )
+            st.download_button(label="📝 下载模型超参数日志 (.txt)", data=st.session_state['param_log'].encode('utf-8'), file_name=f"hyperparameters_log.txt", mime="text/plain")
         with col_dl3:
             csv_data = st.session_state['feature_importance_df'].to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📊 下载完整特征权重清单 (.csv)", 
-                data=csv_data,
-                file_name=f"{st.session_state['model_name_short']}_feature_weights.csv",
-                mime="text/csv",
-                help="导出被算法保留的所有特征名称及其权重。强烈建议导入 MetaboAnalyst / KEGG 平台进行下游生物学通路富集分析。"
-            )
+            st.download_button(label="📊 下载完整特征权重清单 (.csv)", data=csv_data, file_name=f"feature_weights.csv", mime="text/csv")
