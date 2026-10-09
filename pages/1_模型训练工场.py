@@ -386,7 +386,7 @@ if st.session_state['data_loaded']:
             st.pyplot(fig_bar)
 
         # 🌟 核心杀手锏：多线 ROC 提取面板 
-        st.markdown("### 🏆 临床发文级：多模型 ROC 曲线看板")
+        st.markdown("### 🏆 多模型 ROC 曲线看板")
         st.info("💡 如果您对当前的参数调试结果满意，可将其提取至下方的对比看板。切换不同模型反复提取，即可生成多线同框的顶级 SCI 图表。")
         
         col_roc1, col_roc2, col_roc3 = st.columns([2, 1, 1])
