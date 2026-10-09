@@ -128,6 +128,7 @@ if st.session_state['data_loaded']:
         temp_X = df[feature_cols].copy()
         missing_rate = temp_X.isna().sum().sum() / temp_X.size if temp_X.size > 0 else 0
         class_counts = df[target_col].value_counts()
+        imbalance_ratio = class_counts.max() / class_counts.min() if class_counts.min() > 0 else float('inf')
         
         col_h1, col_h2 = st.columns(2)
         with col_h1:
@@ -135,8 +136,11 @@ if st.session_state['data_loaded']:
             else: st.success("✅ 矩阵完整性验证通过：无缺失值。")
         with col_h2:
             if class_counts.min() < 3:
-                st.error("❌ 错误：类别间样本分布极度失衡或单类样本不足以支持交叉验证。"); health_issues += 1
-            else: st.success(f"✅ 样本分布评估通过 (当前数据形态: {n_samples} 样本, {n_features} 原始特征)。")
+                st.error("❌ 错误：单类样本过少 (<3)，无法支持交叉验证，请调整数据或合并分类。"); health_issues += 1
+            elif imbalance_ratio > 3:
+                st.warning(f"⚠️ 提示：检测到样本分布极度失衡 (最大组别是最小组别的 {imbalance_ratio:.1f} 倍)。强烈建议在下方开启【类别权重平衡】机制。")
+            else: 
+                st.success(f"✅ 样本分布评估通过 (当前数据形态: {n_samples} 样本, {n_features} 原始特征)。")
 
     # --- 数据感知型双层调参面板 ---
     st.markdown("### ⚙️ 模型超参数配置 (Hyperparameters Tuning)")
@@ -152,6 +156,12 @@ if st.session_state['data_loaded']:
                 xgb_max_depth = st.slider("最大树深 (max_depth)", 3, 15, 6)
             with col_b2:
                 xgb_lr = st.selectbox("学习率 (learning_rate)", [0.01, 0.05, 0.1, 0.2, 0.3], index=2 if is_small_sample else 1)
+                # 🌟 新增：不平衡干预开关
+                st.write("")
+                use_balance = st.checkbox("⚖️ 启用类别权重平衡 (应对样本极度不均衡)", value=(imbalance_ratio > 3), 
+                                          help="自动增加少数类的误判惩罚。可能略微降低总体准确率，但能防止罕见样本被漏诊，不捏造假数据。")
+                xgb_scale_pos = imbalance_ratio if use_balance else 1.0 # XGBoost 采用权重倍数
+                
         with tune_tabs[1]:
             col_a1, col_a2 = st.columns(2)
             with col_a1:
@@ -164,7 +174,7 @@ if st.session_state['data_loaded']:
         classifier_obj = XGBClassifier(n_estimators=xgb_n_estimators, max_depth=xgb_max_depth, learning_rate=xgb_lr, 
                                        subsample=xgb_subsample, colsample_bytree=xgb_colsample, 
                                        reg_alpha=xgb_alpha, reg_lambda=xgb_lambda, gamma=xgb_gamma,
-                                       random_state=42, eval_metric='logloss')
+                                       scale_pos_weight=xgb_scale_pos, random_state=42, eval_metric='logloss')
         
     elif "RandomForest" in model_choice:
         with tune_tabs[0]:
@@ -174,6 +184,11 @@ if st.session_state['data_loaded']:
             with col_b2:
                 rf_max_depth = st.selectbox("最大树深 (max_depth)", ["None (无限制)", 5, 10, 20, 30], index=1 if is_small_sample else 0)
                 rf_depth_val = None if rf_max_depth == "None (无限制)" else rf_max_depth
+                # 🌟 新增：不平衡干预开关
+                use_balance = st.checkbox("⚖️ 启用类别权重平衡 (class_weight='balanced')", value=(imbalance_ratio > 3),
+                                          help="自动根据频率反比分配分类权重，惩罚模型对占优类的过度倾向。")
+                rf_class_weight = "balanced" if use_balance else None
+                
         with tune_tabs[1]:
             col_a1, col_a2 = st.columns(2)
             with col_a1:
@@ -181,7 +196,8 @@ if st.session_state['data_loaded']:
             with col_a2:
                 rf_min_samples_leaf = st.slider("叶节点最小样本数 (min_samples_leaf)", 1, 10, 1)
         classifier_obj = RandomForestClassifier(n_estimators=rf_n_estimators, max_depth=rf_depth_val, 
-                                                min_samples_split=rf_min_samples_split, min_samples_leaf=rf_min_samples_leaf, random_state=42)
+                                                min_samples_split=rf_min_samples_split, min_samples_leaf=rf_min_samples_leaf, 
+                                                class_weight=rf_class_weight, random_state=42)
 
     elif "SVM" in model_choice:
         with tune_tabs[0]:
@@ -190,10 +206,15 @@ if st.session_state['data_loaded']:
                 svm_C = st.selectbox("误差惩罚权重 (C)", [0.01, 0.1, 1.0, 10.0, 100.0], index=2, help="特征数远大于样本时建议减小 C 以增强正则化约束。")
             with col_b2:
                 svm_kernel = st.selectbox("核函数类型 (Kernel)", ["linear", "rbf", "poly", "sigmoid"], index=0 if (is_high_dim and is_small_sample) else 1, help="高维小样本情形下推荐线性核 (Linear) 避免过拟合；非线性边界需求可选用 RBF。")
+                # 🌟 新增：不平衡干预开关
+                use_balance = st.checkbox("⚖️ 启用类别权重平衡 (class_weight='balanced')", value=(imbalance_ratio > 3))
+                svm_class_weight = "balanced" if use_balance else None
+                
         with tune_tabs[1]:
             st.info("RBF / Poly 核函数参数设定：")
             svm_gamma = st.selectbox("核函数映射系数 (Gamma)", ["scale", "auto", 0.0001, 0.001, 0.01, 0.1, 1.0], index=0, help="决定单样本的影响范围，规模较小有助于获得平滑边界。")
-        classifier_obj = SVC(C=svm_C, kernel=svm_kernel, gamma=svm_gamma, probability=True, random_state=42)
+        classifier_obj = SVC(C=svm_C, kernel=svm_kernel, gamma=svm_gamma, probability=True, 
+                             class_weight=svm_class_weight, random_state=42)
 
     elif "MLP" in model_choice:
         with tune_tabs[0]:
@@ -204,13 +225,17 @@ if st.session_state['data_loaded']:
             with col_b2:
                 dnn_activation = st.selectbox("激活函数 (activation)", ["relu", "tanh", "logistic"])
                 dnn_lr = st.selectbox("初始学习率 (learning_rate_init)", [1e-4, 1e-3, 1e-2], index=1)
+                
+            if imbalance_ratio > 3:
+                st.warning("⚠️ **数据失衡警告：** 当前数据存在类别失衡。原生的 MLPClassifier 不支持内在的分类权重平衡。如需处理高失衡临床队列，请优先考虑 XGBoost 或 Random Forest。")
+                
         with tune_tabs[1]:
             col_a1, col_a2 = st.columns(2)
             with col_a1:
                 dnn_alpha = st.selectbox("L2 权重衰减惩罚 (Weight Decay/alpha)", [1e-5, 1e-4, 1e-3, 1e-2, 0.1], index=2, help="在 Scikit-learn 轻量化架构中作为 Dropout 技术的等效平替方案。组学小样本建议设置为 1e-3 ~ 1e-2。")
             with col_a2:
                 dnn_batch = st.selectbox("小批量规模 (batch_size)", ["auto", 16, 32, 64, 128, 256, 512], index=1 if is_small_sample else 0)
-            st.warning("📌 **关于深度学习环境的声明：** 鉴于 Web 端服务器运行内存与依赖包体积约束，本平台采用 Scikit-learn 的多层感知机 (MLP) 作为轻量级验证方案，并以 L2 权重衰减作为泛化约束。若用户旨在进行超大规模队列模型训练并完整应用如 Dropout 等深度学习原生存组件，建议基于 PyTorch/TensorFlow 框架进行本地高性能工作站部署。如有需要可向岛津支持团队索取进阶版部署脚本。")
+            st.info("📌 **关于深度学习环境的声明：** 鉴于 Web 端服务器约束，本平台采用 Scikit-learn MLP。若需在极不平衡队列中应用 Focal Loss，或完整部署超大规模队列，请向岛津相关人员索取 PyTorch 进阶版脚本。")
             
         try: hidden_layer_sizes = tuple(int(x.strip()) for x in dnn_layers.split(','))
         except: hidden_layer_sizes = (64, 32)
@@ -276,6 +301,7 @@ if st.session_state['data_loaded']:
                 log_text += f"Generation Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 log_text += f"Algorithm Engine: {model_name_short}\n"
                 log_text += f"Input Matrix Demographics: {X.shape[0]} Observations, {X.shape[1]} Raw Features\n"
+                log_text += f"Class Imbalance Handling: Enabled (if applicable)\n"
                 log_text += f"Features Retained Post-screening ({sel_method}): {len(survived_features)}\n\n"
                 log_text += f"--- Classifier Hyperparameter Configuration ---\n"
                 for param, val in final_params.items():
@@ -297,13 +323,12 @@ if st.session_state['data_loaded']:
         
         col_metric1, col_metric2 = st.columns(2)
         with col_metric1:
-            st.metric(label="泛化能力评估\n(5-Fold Cross Validation Accuracy)", 
+            st.metric(label="泛化能力评估 (内部验证)\n(5-Fold Cross Validation Accuracy)", 
                       value=f"{st.session_state['cv_score']:.2%}")
         with col_metric2:
             st.metric(label="内部拟合精度\n(Training Set Accuracy)", 
                       value=f"{st.session_state['train_acc']:.2%}")
                       
-        # --- 🌟 新增：AI 拟合状态智能诊断 ---
         st.markdown("#### 🩺 AI 拟合状态智能诊断")
         acc_train = st.session_state['train_acc']
         acc_cv = st.session_state['cv_score']
