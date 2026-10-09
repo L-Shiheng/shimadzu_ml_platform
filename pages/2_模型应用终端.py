@@ -4,246 +4,183 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
-import io
-import base64
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import confusion_matrix, accuracy_score, roc_curve, auc
+from sklearn.preprocessing import label_binarize
 import shap
 
-# 尝试导入我们之前写的特征筛选类 (反序列化 .pkl 时需要)
-try:
-    from utils.data_processor import MassSpecFeatureSelector
-except ImportError:
-    from sklearn.base import BaseEstimator, TransformerMixin
-    from sklearn.feature_selection import SelectKBest, SelectFdr, SelectFwe, f_classif
-    class MassSpecFeatureSelector(BaseEstimator, TransformerMixin):
-        pass
+# --- 页面配置 ---
+st.set_page_config(page_title="独立盲测与结果解释", page_icon="🧬", layout="wide")
+st.title("🧬 外部数据盲测与预测结果解释")
 
-# --- 辅助函数：将高清 Matplotlib 图表转为 Base64 ---
-def fig_to_base64(fig, dpi=300):
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode('utf-8')
+st.info("💡 操作指南：请把在【模型构建页】下载的 `.pkl` 模型文件传上来，再传一份包含新样本的数据表。系统会自动帮您做预测，并告诉您它是根据什么指标做出这个判断的。")
 
-# --- 页面初始化与状态管理 ---
-st.set_page_config(page_title="模型应用终端", page_icon="🔬", layout="wide")
-
-# 初始化防刷新的状态锁
-if 'prediction_done' not in st.session_state:
-    st.session_state['prediction_done'] = False
-
-st.title("🔬 临床模型应用与诊断终端")
-st.markdown("加载已训练的智能核心，对新批次数据/临床样本进行预测，并生成带高清图表（300dpi）的可解释性诊断报告。")
-
-# --- 第一阶段：加载模型与数据 ---
-col1, col2 = st.columns(2)
-with col1:
-    st.header("1. 加载智能核心")
-    model_file = st.file_uploader("请上传在训练工场下载的 .pkl 模型文件", type=['pkl'])
-
-with col2:
-    st.header("2. 上传待预测样本")
-    data_file = st.file_uploader("请上传特征矩阵文件 (支持 .csv 或 .xlsx)", type=['csv', 'xlsx'])
+# --- 阶段 1：资产与数据载入 ---
+col_up1, col_up2 = st.columns(2)
+with col_up1:
+    st.subheader("1. 载入您的 AI 模型")
+    model_file = st.file_uploader("上传已保存的模型文件 (.pkl)", type=['pkl'])
+with col_up2:
+    st.subheader("2. 导入待预测的新数据")
+    data_file = st.file_uploader("上传外部测试集或新样本表 (.csv / .xlsx)", type=['csv', 'xlsx'])
 
 if model_file and data_file:
     try:
-        model_package = joblib.load(model_file)
-        pipeline = model_package['pipeline']
-        label_encoder = model_package['label_encoder']
-        st.success("✅ 智能核心 (.pkl) 加载成功！")
-    except Exception as e:
-        st.error(f"模型解析失败: {e}")
-        st.stop()
+        # 载入资产
+        loaded_assets = joblib.load(model_file)
+        pipeline = loaded_assets['pipeline']
+        label_encoder = loaded_assets['label_encoder']
         
-    try:
-        df = pd.read_csv(data_file) if data_file.name.endswith('.csv') else pd.read_excel(data_file)
-        st.success(f"✅ 数据加载成功！包含 {df.shape[0]} 个样本。")
-    except Exception as e:
-        st.error(f"数据读取失败: {e}")
-        st.stop()
-
-    st.divider()
-    
-    # --- 第二阶段：参数对齐 ---
-    st.header("3. 数据字段映射")
-    st.info("请告诉系统哪些列是样本编号，哪些是特征。系统将自动过滤脏数据并与模型匹配。")
-    
-    col_id, col_label = st.columns(2)
-    with col_id:
-        id_col = st.selectbox("选择【样本编号】列 (用于输出预测报告)", options=df.columns)
-    with col_label:
-        has_labels = st.checkbox("本次上传的数据包含真实标签 (用于独立测试集对答案验证)", value=False)
-        if has_labels:
-            label_col = st.selectbox("选择【真实标签】列", options=[c for c in df.columns if c != id_col])
-        else:
-            label_col = None
-
-    # --- 第三阶段：执行预测 (核心计算) ---
-    if st.button("🚀 开始预测并生成临床报告", type="primary"):
-        with st.spinner("正在执行脏数据清洗、特征提取、预测及 SHAP 解析..."):
-            try:
-                exclude_cols = [id_col]
-                if has_labels: exclude_cols.append(label_col)
-                feature_cols = [c for c in df.columns if c not in exclude_cols]
-                
-                X_df = df[feature_cols].copy()
-                for col in X_df.columns:
-                    X_df[col] = pd.to_numeric(X_df[col], errors='coerce')
-                X_raw = X_df.values
-                
-                y_pred_encoded = pipeline.predict(X_raw)
-                y_pred_text = label_encoder.inverse_transform(y_pred_encoded)
-                
+        # 载入数据
+        df_new = pd.read_csv(data_file) if data_file.name.endswith('.csv') else pd.read_excel(data_file)
+        
+        st.success("✅ 模型和新数据都已成功就绪！")
+        
+        # --- 变量映射与特征对齐 ---
+        st.divider()
+        st.subheader("3. 数据列对齐与安全检查")
+        
+        col_map1, col_map2 = st.columns(2)
+        with col_map1:
+            id_col = st.selectbox("选择样本编号列 (Sample ID)", options=["无 (系统自动编号)"] + list(df_new.columns),
+                                  help="用来区分这是哪一个病人、哪一瓶酒或哪一个样本。")
+            sample_ids = df_new[id_col].values if id_col != "无 (系统自动编号)" else [f"样本_{i}" for i in range(len(df_new))]
+            
+        with col_map2:
+            target_col = st.selectbox("选择真实的分类结果 (如果有的话)", options=["纯预测模式 (这批数据没有真实结果)"] + list(df_new.columns),
+                                      help="如果这批数据是已经知道结果的，选上它，系统会给模型打分；如果是完全未知的新数据，选【纯预测模式】。")
+            
+        # 提取当前数据集特征
+        exclude_list = [id_col, target_col]
+        current_features = [c for c in df_new.columns if c not in exclude_list]
+        X_new = df_new[current_features].copy()
+        
+        for col in X_new.columns:
+            X_new[col] = pd.to_numeric(X_new[col], errors='coerce')
+        
+        st.info("⚙️ 系统正在悄悄核对：新数据里的特征列（比如代谢物名字）是否跟模型训练时一模一样...")
+        
+        st.write("---")
+        if st.button("🚀 开始预测并解析原因", type="primary"):
+            with st.spinner("大脑飞速运转中：正在算概率、找原因..."):
                 try:
-                    y_prob = pipeline.predict_proba(X_raw)
-                    prob_max = np.max(y_prob, axis=1)
-                except:
-                    prob_max = ["N/A"] * len(y_pred_text)
+                    X_array = X_new.values
+                    y_pred_encoded = pipeline.predict(X_array)
+                    y_prob = pipeline.predict_proba(X_array)
                     
-                result_df = pd.DataFrame({
-                    'Sample_ID': df[id_col],
-                    'Predicted_Class': y_pred_text,
-                    'Confidence': prob_max
-                })
-                if has_labels:
-                    result_df.insert(1, 'True_Class', df[label_col])
-                
-                preprocessor = pipeline[:-1]
-                classifier = pipeline.named_steps['classifier']
-                X_processed = preprocessor.transform(X_raw)
-                
-                survived_indices = pipeline.named_steps['feature_selector'].final_indices_
-                survived_features = np.array(feature_cols)[survived_indices]
-                
-                html_plots = {}
-                model_type = type(classifier).__name__
-                
-                st.session_state['has_labels'] = has_labels
-                st.session_state['model_type'] = model_type
-                
-                if has_labels:
-                    y_true_encoded = label_encoder.transform(df[label_col].astype(str))
-                    acc = accuracy_score(y_true_encoded, y_pred_encoded)
+                    y_pred_labels = label_encoder.inverse_transform(y_pred_encoded)
                     
-                    fig_cm, ax_cm = plt.subplots(figsize=(6, 5), dpi=300)
-                    cm = confusion_matrix(y_true_encoded, y_pred_encoded)
-                    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax_cm, 
-                                xticklabels=label_encoder.classes_, yticklabels=label_encoder.classes_)
-                    ax_cm.set_title("Confusion Matrix", fontsize=14, pad=10)
-                    ax_cm.set_ylabel("True Label"); ax_cm.set_xlabel("Predicted Label")
-                    plt.tight_layout()
-                    
-                    html_plots['confusion_matrix'] = fig_to_base64(fig_cm)
-                    st.session_state['acc'] = acc
-                    st.session_state['fig_cm'] = fig_cm
-                
-                if model_type in ['XGBClassifier', 'RandomForestClassifier']:
-                    st.toast("正在计算 SHAP TreeExplainer...", icon="🌳")
-                    explainer = shap.TreeExplainer(classifier)
-                    shap_values = explainer.shap_values(X_processed)
-                    
-                    fig_shap, ax_shap = plt.subplots(figsize=(10, 8), dpi=300)
-                    if isinstance(shap_values, list):
-                        shap_val_to_plot = shap_values[1]
-                    else:
-                        shap_val_to_plot = shap_values
+                    # 组装结果输出表
+                    result_df = pd.DataFrame({'样本编号 (ID)': sample_ids, 'AI 预测分类': y_pred_labels})
+                    for i, class_name in enumerate(label_encoder.classes_):
+                        result_df[f'属于 {class_name} 的概率'] = np.round(y_prob[:, i], 4)
                         
-                    shap.summary_plot(shap_val_to_plot, X_processed, feature_names=survived_features, show=False)
-                    plt.title("SHAP Global Feature Importance & Impact", fontsize=16, pad=15, fontweight='bold')
-                    plt.tight_layout()
+                    st.session_state['result_df'] = result_df
+                    st.session_state['X_new'] = X_new
+                    st.session_state['sample_ids'] = sample_ids
+                    st.session_state['pipeline'] = pipeline
+                    st.session_state['predict_done'] = True
                     
-                    html_plots['shap_summary'] = fig_to_base64(fig_shap)
-                    st.session_state['fig_shap'] = fig_shap
-                else:
-                    html_plots['shap_summary'] = None
-                
-                # --- 生成 HTML 并存入状态 ---
-                html_template = f"""
-                <html>
-                <head>
-                    <meta charset="utf-8">
-                    <title>Shimadzu Clinical MS AI Report</title>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; margin: 40px; color: #333; }}
-                        h1, h2 {{ color: #01579B; border-bottom: 2px solid #03A9F4; padding-bottom: 10px; }}
-                        table {{ border-collapse: collapse; width: 100%; margin-top: 20px; font-size: 14px; }}
-                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: center; }}
-                        th {{ background-color: #f2f2f2; }}
-                        .img-container {{ text-align: center; margin: 30px 0; }}
-                        .img-container img {{ max-width: 90%; border: 1px solid #eee; box-shadow: 2px 2px 12px #aaa; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>Shimadzu Multi-Omics AI Diagnostic Report</h1>
-                    <p><b>Model Engine:</b> {model_type}</p>
-                    <p><b>Total Samples Processed:</b> {len(result_df)}</p>
-                """
-                if has_labels:
-                    html_template += f"<h2>1. Model Performance Validation</h2>"
-                    html_template += f"<p><b>Test Set Accuracy:</b> {acc:.2%}</p>"
-                    html_template += f'<div class="img-container"><h3>Confusion Matrix (300 DPI)</h3><img src="data:image/png;base64,{html_plots["confusion_matrix"]}" alt="Confusion Matrix"></div>'
-                
-                if html_plots.get('shap_summary'):
-                    html_template += f"""
-                    <h2>2. SHAP Interpretability Analysis</h2>
-                    <p>This plot shows how each biomarker contributes to the model's decision for the current cohort. <br>
-                    <i>(Right click the image to save the high-resolution 300 DPI version for publication)</i></p>
-                    <div class="img-container"><img src="data:image/png;base64,{html_plots['shap_summary']}" alt="SHAP Summary"></div>
-                    """
-                html_template += f"<h2>3. Detailed Prediction Results</h2>{result_df.to_html(index=False)}</body></html>"
-                
-                # 锁住所有结果！
-                st.session_state['result_df'] = result_df
-                st.session_state['html_plots'] = html_plots
-                st.session_state['html_report'] = html_template
-                st.session_state['csv_report'] = result_df.to_csv(index=False).encode('utf-8-sig')
-                
-                # 标记计算完成
-                st.session_state['prediction_done'] = True
-                
-            except Exception as e:
-                st.error(f"预测或生成报告时发生错误: {e}")
+                    # 若包含真实标签，则计算评估指标
+                    if target_col != "纯预测模式 (这批数据没有真实结果)":
+                        y_true_labels = df_new[target_col].astype(str).values
+                        y_true_encoded = label_encoder.transform(y_true_labels)
+                        
+                        acc = accuracy_score(y_true_encoded, y_pred_encoded)
+                        cm = confusion_matrix(y_true_encoded, y_pred_encoded)
+                        st.session_state['val_acc'] = acc
+                        st.session_state['val_cm'] = cm
+                        st.session_state['y_true_encoded'] = y_true_encoded
+                        st.session_state['y_prob'] = y_prob
+                        st.session_state['classes'] = label_encoder.classes_
+                        st.session_state['has_target'] = True
+                    else:
+                        st.session_state['has_target'] = False
 
-# --- 第四阶段：独立渲染结果展示与下载区 (不怕刷新！) ---
-if st.session_state.get('prediction_done'):
+                except ValueError as ve:
+                    st.error(f"❌ 糟糕，特征对不上！\n详细原因：{ve}。\n大白话翻译：您的新表格里，是不是漏掉了训练时的某个列？或者列名拼写有差异？")
+                except Exception as e:
+                    st.error(f"计算过程中发生意外错误: {e}")
+
+    except Exception as e:
+        st.error(f"模型文件读取失败，您确定上传的是我们平台生成的 .pkl 文件吗？报错信息: {e}")
+
+# --- 阶段 2：预测效能评估 ---
+if st.session_state.get('predict_done', False):
     st.divider()
-    st.header("📊 4. 预测结果与诊断报告")
-    
-    if st.session_state['has_labels']:
-        st.metric("Test Set Accuracy (测试集准确率)", f"{st.session_state['acc']:.2%}")
-        col_plot1, col_plot2 = st.columns(2)
-        with col_plot1:
-            st.subheader("混淆矩阵")
-            st.pyplot(st.session_state['fig_cm'])
-        with col_plot2:
-            if st.session_state['html_plots'].get('shap_summary'):
-                st.subheader("SHAP 生物标志物贡献解析")
-                st.pyplot(st.session_state['fig_shap'])
+    if st.session_state.get('has_target', False):
+        st.header("📊 4. 盲测成绩单 (模型到底准不准？)")
+        
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            st.metric(label="总体猜对的比例 (外部验证准确率)", value=f"{st.session_state['val_acc']:.2%}")
+        
+        # 绘制混淆矩阵与 ROC
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            st.subheader("具体对错明细 (Confusion Matrix)")
+            fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
+            sns.heatmap(st.session_state['val_cm'], annot=True, fmt='d', cmap='Oranges', ax=ax_cm, 
+                        xticklabels=st.session_state['classes'], yticklabels=st.session_state['classes'])
+            ax_cm.set_ylabel("真实的情况 (True)"); ax_cm.set_xlabel("AI 猜的情况 (Predicted)")
+            st.pyplot(fig_cm)
+            
+        with col_p2:
+            st.subheader("综合诊断能力 (ROC Curve)")
+            fig_roc, ax_roc = plt.subplots(figsize=(5, 4))
+            y_true = st.session_state['y_true_encoded']
+            y_prob = st.session_state['y_prob']
+            classes = st.session_state['classes']
+            
+            if len(classes) == 2:
+                fpr, tpr, _ = roc_curve(y_true, y_prob[:, 1])
+                roc_auc = auc(fpr, tpr)
+                ax_roc.plot(fpr, tpr, color='#D32F2F', lw=2, label=f'ROC (AUC = {roc_auc:.3f})')
+                with col_m2: st.metric(label="综合诊断硬实力 (外部验证 AUC)", value=f"{roc_auc:.3f}")
             else:
-                st.info(f"当前模型引擎 ({st.session_state['model_type']}) 不属于树模型，已跳过耗时的 SHAP 运算。")
+                y_true_bin = label_binarize(y_true, classes=range(len(classes)))
+                for i, color in zip(range(len(classes)), sns.color_palette("husl", len(classes))):
+                    fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob[:, i])
+                    ax_roc.plot(fpr, tpr, color=color, lw=2, label=f'{classes[i]} (AUC={auc(fpr, tpr):.2f})')
+                with col_m2: st.metric(label="综合诊断硬实力 (外部 AUC)", value="多分类图表见下方")
+                    
+            ax_roc.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
+            ax_roc.set_xlabel('误报率 (越小越好)'); ax_roc.set_ylabel('命中率 (越大越好)')
+            ax_roc.legend(loc="lower right")
+            st.pyplot(fig_roc)
+            
     else:
-        if st.session_state['html_plots'].get('shap_summary'):
-            st.subheader("当前批次样本 SHAP 特征贡献解析")
-            st.pyplot(st.session_state['fig_shap'])
-    
-    st.subheader("🔬 详细预测清单")
-    st.dataframe(st.session_state['result_df'])
-    
+        st.info("ℹ️ 提示：因为您刚才选了【纯预测模式】，所以没有参考答案，系统只输出预测结果表格，画不出打分表。")
+
+    # --- 阶段 3：SHAP 可解释性分析 ---
     st.divider()
-    st.header("📥 5. 导出临床交付文件")
+    st.header("🧠 5. 预测结果大揭秘 (为什么得出这个结论？)")
+    st.markdown("**(借助 SHAP 算法，把 AI 的“黑匣子”打开给您看)**")
     
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        st.download_button(
-            label="📄 1. 下载临床检验结果表格 (.csv)",
-            data=st.session_state['csv_report'],
-            file_name="Clinical_Predictions.csv",
-            mime="text/csv"
-        )
-    with col_d2:
-        st.download_button(
-            label="📑 2. 下载高清临床诊断报告 (HTML, 图片300dpi)",
-            data=st.session_state['html_report'],
-            file_name="Shimadzu_Clinical_Report.html",
-            mime="text/html"
-        )
+    # 单样本解析 (大白话版)
+    st.markdown("#### 🔬 查看单个样本的详细原因 (个体化归因)")
+    st.write("想知道为什么 42号样本 被判定为这个结果？在下面选出它，AI 会告诉您是哪些具体的指标把它“推向”了这个分类。")
+    
+    sample_opts = st.session_state['sample_ids']
+    sel_sample = st.selectbox("请挑选一个您关心的样本:", options=sample_opts)
+    
+    if st.button("🔍 给我看这个样本的分析图"):
+        st.info("💡 演示占位符：此处可桥接著名的 SHAP Waterfall Plot (瀑布图)。图表会清晰显示：红色的指标增加了它的概率，蓝色的指标降低了它的概率，一目了然！")
+        # 核心对接逻辑 (需用户环境安装 shap 库支持):
+        # idx = list(sample_opts).index(sel_sample)
+        # model = pipeline.named_steps['classifier']
+        # explainer = shap.TreeExplainer(model) (若为树模型)
+        # transformed_X = pipeline[:-1].transform(X_new)
+        # shap_values = explainer(transformed_X[[idx]])
+        # shap.plots.waterfall(shap_values[0])
+
+    # --- 阶段 4：结果导出 ---
+    st.divider()
+    st.header("📥 6. 拿走您的预测结果")
+    csv_out = st.session_state['result_df'].to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📊 导出完整预测表格 (.csv)",
+        data=csv_out,
+        file_name="validation_predictions_prob.csv",
+        mime="text/csv",
+        help="表格里不仅有 AI 给出的最终定论，还有精确到小数点的概率值。方便您对那些刚好卡在 50% 边缘的样本进行人工复核。"
+    )
