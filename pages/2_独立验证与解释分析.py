@@ -16,7 +16,7 @@ st.info("💡 操作提示：请上传由【模型构建】阶段导出的算法
 # --- 阶段 1：资产与数据载入 ---
 col_up1, col_up2 = st.columns(2)
 with col_up1:
-    st.subheader("1. 导入预测模型资产")
+    st.subheader("1. 导入预测模型")
     model_file = st.file_uploader("上传已训练的模型文件 (.pkl)", type=['pkl'])
 with col_up2:
     st.subheader("2. 导入待测数据集")
