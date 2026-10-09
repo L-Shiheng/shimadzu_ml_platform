@@ -12,7 +12,7 @@ from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
-from sklearn.metrics import confusion_matrix, accuracy_score
+from sklearn.metrics import confusion_matrix, accuracy_score, roc_curve, auc, roc_auc_score
 import joblib
 import io
 import datetime
@@ -156,11 +156,10 @@ if st.session_state['data_loaded']:
                 xgb_max_depth = st.slider("最大树深 (max_depth)", 3, 15, 6)
             with col_b2:
                 xgb_lr = st.selectbox("学习率 (learning_rate)", [0.01, 0.05, 0.1, 0.2, 0.3], index=2 if is_small_sample else 1)
-                # 🌟 新增：不平衡干预开关
                 st.write("")
                 use_balance = st.checkbox("⚖️ 启用类别权重平衡 (应对样本极度不均衡)", value=(imbalance_ratio > 3), 
                                           help="自动增加少数类的误判惩罚。可能略微降低总体准确率，但能防止罕见样本被漏诊，不捏造假数据。")
-                xgb_scale_pos = imbalance_ratio if use_balance else 1.0 # XGBoost 采用权重倍数
+                xgb_scale_pos = imbalance_ratio if use_balance else 1.0 
                 
         with tune_tabs[1]:
             col_a1, col_a2 = st.columns(2)
@@ -184,7 +183,6 @@ if st.session_state['data_loaded']:
             with col_b2:
                 rf_max_depth = st.selectbox("最大树深 (max_depth)", ["None (无限制)", 5, 10, 20, 30], index=1 if is_small_sample else 0)
                 rf_depth_val = None if rf_max_depth == "None (无限制)" else rf_max_depth
-                # 🌟 新增：不平衡干预开关
                 use_balance = st.checkbox("⚖️ 启用类别权重平衡 (class_weight='balanced')", value=(imbalance_ratio > 3),
                                           help="自动根据频率反比分配分类权重，惩罚模型对占优类的过度倾向。")
                 rf_class_weight = "balanced" if use_balance else None
@@ -206,7 +204,6 @@ if st.session_state['data_loaded']:
                 svm_C = st.selectbox("误差惩罚权重 (C)", [0.01, 0.1, 1.0, 10.0, 100.0], index=2, help="特征数远大于样本时建议减小 C 以增强正则化约束。")
             with col_b2:
                 svm_kernel = st.selectbox("核函数类型 (Kernel)", ["linear", "rbf", "poly", "sigmoid"], index=0 if (is_high_dim and is_small_sample) else 1, help="高维小样本情形下推荐线性核 (Linear) 避免过拟合；非线性边界需求可选用 RBF。")
-                # 🌟 新增：不平衡干预开关
                 use_balance = st.checkbox("⚖️ 启用类别权重平衡 (class_weight='balanced')", value=(imbalance_ratio > 3))
                 svm_class_weight = "balanced" if use_balance else None
                 
@@ -257,6 +254,7 @@ if st.session_state['data_loaded']:
                 le = LabelEncoder()
                 y = le.fit_transform(df[target_col].values)
                 st.session_state['label_encoder'] = le
+                is_multiclass = len(le.classes_) > 2
                 
                 ms_pipeline = Pipeline(steps=[
                     ('imputer', SimpleImputer(strategy='median')), 
@@ -265,16 +263,30 @@ if st.session_state['data_loaded']:
                     ('classifier', classifier_obj) 
                 ])
                 
+                # --- CV 准确率评估 ---
                 ms_pipeline.fit(X, y)
                 st.session_state['cv_score'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5))
                 
+                # --- CV AUC 评估 (SCI 发文金标准) ---
+                try:
+                    scoring_auc = 'roc_auc_ovr' if is_multiclass else 'roc_auc'
+                    st.session_state['cv_auc'] = np.mean(cross_val_score(ms_pipeline, X, y, cv=5, scoring=scoring_auc))
+                except:
+                    st.session_state['cv_auc'] = np.nan
+                
+                # --- 内部拟合与预测概率获取 ---
                 y_pred_train = ms_pipeline.predict(X)
+                y_prob_train = ms_pipeline.predict_proba(X)
+                
                 st.session_state['train_acc'] = accuracy_score(y, y_pred_train)
                 st.session_state['cm_train'] = confusion_matrix(y, y_pred_train)
+                st.session_state['y_train_true'] = y
+                st.session_state['y_prob_train'] = y_prob_train
                 
                 survived_indices = ms_pipeline.named_steps['feature_selector'].final_indices_
                 survived_features = np.array(feature_cols)[survived_indices]
                 
+                # --- 特征贡献度计算 ---
                 if model_name_short in ["XGBoost", "RandomForest"]:
                     importances = ms_pipeline.named_steps['classifier'].feature_importances_
                 else:
@@ -319,14 +331,20 @@ if st.session_state['data_loaded']:
     # --- 第四阶段：结果展示 ---
     if st.session_state['model_trained']:
         st.divider()
-        st.header(f"📊 4. 模型评估与关键变量解析")
+        st.header(f"📊 4. 模型诊断与关键生物学变量解析")
         
-        col_metric1, col_metric2 = st.columns(2)
+        # 🌟 指标看板升级：加入 AUC
+        col_metric1, col_metric2, col_metric3 = st.columns(3)
         with col_metric1:
-            st.metric(label="泛化能力评估 (内部验证)\n(5-Fold Cross Validation Accuracy)", 
+            st.metric(label="5-Fold Cross Validation Accuracy\n(泛化精度 - 内部验证)", 
                       value=f"{st.session_state['cv_score']:.2%}")
         with col_metric2:
-            st.metric(label="内部拟合精度\n(Training Set Accuracy)", 
+            auc_val = st.session_state['cv_auc']
+            auc_str = f"{auc_val:.3f}" if not np.isnan(auc_val) else "N/A"
+            st.metric(label="5-Fold CV AUC Score\n(ROC曲线下面积 - 诊断金标准)", 
+                      value=auc_str)
+        with col_metric3:
+            st.metric(label="Training Set Accuracy\n(内部拟合精度 - 过拟合参考)", 
                       value=f"{st.session_state['train_acc']:.2%}")
                       
         st.markdown("#### 🩺 AI 拟合状态智能诊断")
@@ -335,22 +353,23 @@ if st.session_state['data_loaded']:
         diff = acc_train - acc_cv
         
         if acc_train < 0.70 and acc_cv < 0.70:
-            st.warning("⚠️ **诊断结论：检测到欠拟合 (Underfitting) 风险。** 模型未能充分捕捉数据规律，在训练集本身表现即不佳。建议检查特征质量、放宽正则化参数，或尝试其他非线性核心算法。")
+            st.warning("⚠️ **诊断结论：检测到欠拟合 (Underfitting) 风险。** 模型未能充分捕捉数据规律，在训练集本身表现即不佳。建议检查特征质量、放宽正则化参数，或尝试其他核心算法。")
         elif diff > 0.15:
-            st.error(f"⚠️ **诊断结论：检测到显著的过拟合 (High Overfitting) 风险。** 内部拟合精度比泛化能力高出 {diff:.1%}，模型存在严重的“死记硬背”现象，应用于未知样本时表现可能崩塌。请前往【高级面板】调小树深 (max_depth) 或增加 L1/L2 正则化系数。")
+            st.error(f"⚠️ **诊断结论：检测到显著的过拟合 (High Overfitting) 风险。** 内部精度比泛化能力高出 {diff:.1%}，模型严重“死记硬背”，未知样本表现堪忧。请前往【高级面板】调小树深或增加正则化系数。")
         elif diff > 0.08:
-            st.warning(f"⚠️ **诊断结论：存在轻微过拟合趋势。** 内部拟合精度比泛化能力高出 {diff:.1%}。若泛化评估已达临床要求可忽略；若仍需优化，可尝试适度调低特征列采样率 (colsample_bytree)。")
+            st.warning(f"⚠️ **诊断结论：存在轻微过拟合趋势。** 内部精度高出泛化能力 {diff:.1%}。若泛化评估已达临床要求可忽略；若仍需优化，可尝试适度调低特征列采样率。")
         elif acc_cv >= 0.75:
-            st.success("✅ **诊断结论：模型拟合状态极佳 (Optimal Fit)。** 兼具高精度与优秀的泛化能力，未出现明显的数据过拟合迹象。当前模型极其健康，可直接导出并应用于下阶段的临床盲测与验证。")
+            st.success("✅ **诊断结论：模型拟合状态极佳 (Optimal Fit)。** 兼具高精度与优秀的泛化能力。当前模型极其健康，可直接导出并应用于下阶段的临床盲测与验证。")
         else:
-            st.info("ℹ️ **诊断结论：模型状态正常。** 未见严重过拟合，但整体预测精度仍有提升空间。建议补充高质量特征或扩大队列样本量。")
+            st.info("ℹ️ **诊断结论：模型状态正常。** 未见严重过拟合，但整体诊断效能仍有提升空间。建议补充高质量特征或扩大队列样本量。")
         st.write("---")
         
-        col_plot1, col_plot2 = st.columns([1, 1.5])
+        # 🌟 图像布局升级：三列展示（混淆矩阵、ROC 曲线、特征重要性）
+        col_plot1, col_plot2, col_plot3 = st.columns([1, 1, 1.2])
+        
         with col_plot1:
-            st.subheader("Training Set Confusion Matrix")
-            st.markdown("**(模型对训练集内部的拟合表现)**")
-            fig_cm, ax_cm = plt.subplots(figsize=(6, 5))
+            st.subheader("Training Confusion Matrix")
+            fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
             le_classes = st.session_state['label_encoder'].classes_
             sns.heatmap(st.session_state['cm_train'], annot=True, fmt='d', cmap='Blues', ax=ax_cm,
                         xticklabels=le_classes, yticklabels=le_classes)
@@ -358,33 +377,65 @@ if st.session_state['data_loaded']:
             st.pyplot(fig_cm)
             
         with col_plot2:
+            st.subheader("Training ROC Curve")
+            fig_roc, ax_roc = plt.subplots(figsize=(5, 4))
+            y_true = st.session_state['y_train_true']
+            y_prob = st.session_state['y_prob_train']
+            
+            if len(le_classes) == 2:
+                fpr, tpr, _ = roc_curve(y_true, y_prob[:, 1])
+                roc_auc = auc(fpr, tpr)
+                ax_roc.plot(fpr, tpr, color='#01579B', lw=2, label=f'ROC (AUC = {roc_auc:.3f})')
+            else:
+                for i, color in zip(range(len(le_classes)), sns.color_palette("husl", len(le_classes))):
+                    fpr, tpr, _ = roc_curve(y_true == i, y_prob[:, i])
+                    ax_roc.plot(fpr, tpr, color=color, lw=2, label=f'{le_classes[i]} (AUC = {auc(fpr, tpr):.2f})')
+            
+            ax_roc.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
+            ax_roc.set_xlabel('False Positive Rate'); ax_roc.set_ylabel('True Positive Rate')
+            ax_roc.legend(loc="lower right", fontsize=8)
+            st.pyplot(fig_roc)
+            
+        with col_plot3:
             st.subheader(f"Top Features Relative Importance")
             df_plot = st.session_state['feature_importance_df']
-            fig_bar, ax_bar = plt.subplots(figsize=(10, 8)) 
-            sns.barplot(x='Importance', y='Feature', data=df_plot.head(20), palette='viridis', ax=ax_bar)
-            ax_bar.set_xlabel(f"Normalized Importance Score (0-1) - Model: {st.session_state['model_name_short']}", fontsize=12)
-            plt.subplots_adjust(left=0.4); sns.despine()
+            fig_bar, ax_bar = plt.subplots(figsize=(6, 5)) 
+            sns.barplot(x='Importance', y='Feature', data=df_plot.head(15), palette='viridis', ax=ax_bar)
+            ax_bar.set_xlabel(f"Normalized Score (0-1)", fontsize=10)
+            ax_bar.set_ylabel("")
+            plt.subplots_adjust(left=0.3); sns.despine()
             st.pyplot(fig_bar)
         
         st.divider()
-        st.header("📥 5. 核心资产与参数日志输出")
-        col_dl1, col_dl2 = st.columns(2)
+        st.header("📥 5. 核心资产输出与科研通路分析接口")
+        # 🌟 导出区域升级：增加完整标志物清单的 CSV 导出
+        col_dl1, col_dl2, col_dl3 = st.columns(3)
         
         buffer = io.BytesIO()
         joblib.dump({'pipeline': st.session_state['trained_pipeline'], 'label_encoder': st.session_state['label_encoder']}, buffer)
         
         with col_dl1:
             st.download_button(
-                label=f"📦 下载序列化模型文件 (.pkl) 供验证终端使用", 
+                label=f"📦 下载算法序列化模型 (.pkl)", 
                 data=buffer.getvalue(),
                 file_name=f"shimadzu_{st.session_state['model_name_short'].lower()}_model.pkl",
-                mime="application/octet-stream"
+                mime="application/octet-stream",
+                help="直接应用于【第 2 页 模型应用终端】，对全新临床队列进行独立盲测并生成 SHAP 报告。"
             )
         with col_dl2:
             st.download_button(
-                label="📝 下载模型超参数配置文件 (Methods 写作参考)", 
+                label="📝 下载模型超参数日志 (.txt)", 
                 data=st.session_state['param_log'].encode('utf-8'),
                 file_name=f"{st.session_state['model_name_short']}_hyperparameters_log.txt",
                 mime="text/plain",
-                help="该日志包含模型训练中确定的所有特征处理规则与超参数配置方案，可作为科研文献材料补充。"
+                help="SCI 论文 Methods 写作必备：记录模型训练的底层配置方案以备审稿复现验证。"
+            )
+        with col_dl3:
+            csv_data = st.session_state['feature_importance_df'].to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📊 下载完整特征权重清单 (.csv)", 
+                data=csv_data,
+                file_name=f"{st.session_state['model_name_short']}_feature_weights.csv",
+                mime="text/csv",
+                help="导出被算法保留的所有特征名称及其权重。强烈建议导入 MetaboAnalyst / KEGG 平台进行下游生物学通路富集分析。"
             )
