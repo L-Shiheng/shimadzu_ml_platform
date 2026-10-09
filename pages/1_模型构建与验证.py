@@ -346,6 +346,53 @@ if st.session_state['data_loaded']:
                 st.session_state['model_name_short'] = model_name_short
                 st.session_state['model_trained'] = True
                 st.success(f"✅ 模型拟合流程执行完毕。{model_name_short} 预测器对象及评估指标已生成。")
+            st.session_state['trained_pipeline'] = ms_pipeline
+                st.session_state['model_name_short'] = model_name_short
+                st.session_state['model_trained'] = True
+                st.success(f"✅ 模型拟合流程执行完毕。{model_name_short} 预测器对象及评估指标已生成。")
+                
+                # ==========================================
+                # 📡 自动日志发送模块 (植入成功)
+                # ==========================================
+                try:
+                    import requests
+                    import uuid
+                    
+                    # 1. 确保当前会话有唯一 ID
+                    if 'session_id' not in st.session_state:
+                        st.session_state['session_id'] = str(uuid.uuid4())[:8]
+                    
+                    # 2. 捕获真实 IP 的防呆处理
+                    user_ip = "127.0.0.1"
+                    try:
+                        if hasattr(st, 'context') and hasattr(st.context, 'headers'):
+                            forwarded_for = st.context.headers.get("X-Forwarded-For", "127.0.0.1")
+                            user_ip = forwarded_for.split(',')[0]
+                    except:
+                        pass
+                    
+                    # 3. 👉 把这里换成你在 Power Automate 复制的【长网址】
+                    WEBHOOK_URL = "https://defaultf4781729e7424338bea6f53f3e2384.27.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/01/workflows/eaa6b794e76b47f3863a13bbb8266c1a/triggers/manual/paths/invoke?api-version=1" 
+                    
+                    # 4. 组装要发送的真实动态数据
+                    log_data = {
+                        "Time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Page": "1_模型构建与验证",
+                        "Action": f"成功训练模型 ({model_name_short})",
+                        "Model": model_name_short,
+                        "Sample_Count": int(X.shape[0]),
+                        "User_IP": user_ip,
+                        "Session_ID": st.session_state['session_id'],
+                        "User_Name": "罗世恒"  # 后续如果你愿意，也可以加个侧边栏 input 让用户自己填
+                    }
+                    
+                    # 5. 静默发送 (timeout=5 绝不卡死网页)
+                    requests.post(WEBHOOK_URL, json=log_data, timeout=5)
+                    st.toast("📡 运行日志已静默同步至 OneDrive", icon="✅")
+                    
+                except Exception as e:
+                    pass # 发生任何异常静默跳过
+                
             except Exception as e:
                 st.error(f"建模过程发生异常中断: {e}")
 
