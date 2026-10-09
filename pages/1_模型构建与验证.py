@@ -346,11 +346,7 @@ if st.session_state['data_loaded']:
                 st.session_state['model_name_short'] = model_name_short
                 st.session_state['model_trained'] = True
                 st.success(f"✅ 模型拟合流程执行完毕。{model_name_short} 预测器对象及评估指标已生成。")
-            st.session_state['trained_pipeline'] = ms_pipeline
-                st.session_state['model_name_short'] = model_name_short
-                st.session_state['model_trained'] = True
-                st.success(f"✅ 模型拟合流程执行完毕。{model_name_short} 预测器对象及评估指标已生成。")
-                
+                            
                 # ==========================================
                 # 📡 自动日志发送模块 (植入成功)
                 # ==========================================
