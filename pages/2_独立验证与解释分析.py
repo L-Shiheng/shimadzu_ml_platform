@@ -120,7 +120,7 @@ if st.session_state.get('predict_done', False):
             fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
             sns.heatmap(st.session_state['val_cm'], annot=True, fmt='d', cmap='Oranges', ax=ax_cm, 
                         xticklabels=st.session_state['classes'], yticklabels=st.session_state['classes'])
-            ax_cm.set_ylabel("实际标签 (True Label)"); ax_cm.set_xlabel("预测标签 (Predicted Label)")
+            ax_cm.set_ylabel("(True Label)"); ax_cm.set_xlabel("(Predicted Label)")
             st.pyplot(fig_cm)
             
         with col_p2:
@@ -143,7 +143,7 @@ if st.session_state.get('predict_done', False):
                 with col_m2: st.metric(label="受试者工作特征曲线下面积 (AUC)", value="见多分类曲线集")
                     
             ax_roc.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
-            ax_roc.set_xlabel('假阳性率 (FPR)'); ax_roc.set_ylabel('真阳性率 (TPR)')
+            ax_roc.set_xlabel('(FPR)'); ax_roc.set_ylabel('(TPR)')
             ax_roc.legend(loc="lower right")
             st.pyplot(fig_roc)
             
