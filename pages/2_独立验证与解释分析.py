@@ -155,8 +155,50 @@ if st.session_state.get('predict_done', False):
     st.header("🧠 5. 特征归因分析 (SHAP 解释)")
     st.markdown("**(借助 SHapley Additive exPlanations 算法解析模型判定依据)**")
     
-    # 单样本解析
-    st.markdown("#### 🔬 单样本预测原理解析")
+    # 1. 全局特征归因分析
+    st.markdown("#### 🌐 全局特征影响汇总 (Global Summary)")
+    st.write("计算当前整批验证集数据，生成 SHAP 特征汇总图。用于观察哪些特征对全局预测贡献最大，以及特征数值高低如何影响分类倾向。")
+    
+    if st.button("📊 生成全局特征影响图"):
+        with st.spinner("系统正在对全量测试数据进行矩阵积分运算，请稍候..."):
+            try:
+                import shap
+                pipeline = st.session_state['pipeline']
+                model = pipeline.named_steps['classifier']
+                X_transformed = pipeline[:-1].transform(st.session_state['X_new'])
+                
+                feature_selector = pipeline.named_steps['feature_selector']
+                survived_indices = feature_selector.final_indices_
+                survived_features = np.array(st.session_state['X_new'].columns)[survived_indices]
+                
+                model_name = type(model).__name__
+                
+                if "XGB" in model_name or "RandomForest" in model_name:
+                    plt.clf() # 清空画板防止重影
+                    explainer = shap.TreeExplainer(model)
+                    shap_values = explainer(X_transformed)
+                    shap_values.feature_names = list(survived_features)
+                    
+                    fig = plt.figure(figsize=(8, 6))
+                    if len(shap_values.shape) == 3: # 多分类
+                        shap.summary_plot(shap_values, X_transformed, feature_names=list(survived_features), show=False)
+                    else: # 二分类
+                        shap.plots.beeswarm(shap_values, show=False)
+                    
+                    st.pyplot(plt.gcf())
+                    st.success("✅ 全局分析生成完毕。")
+                else:
+                    st.warning("⚠️ 平台说明：当前使用的 SVM 或 MLP 模型不支持快速全局 SHAP 渲染。")
+                    
+            except ImportError:
+                st.error("❌ 缺失组件模块：您的环境中未安装 `shap` 依赖库。")
+            except Exception as e:
+                st.error(f"❌ 解析运算过程中发生计算异常: {e}")
+
+    st.write("---")
+
+    # 2. 单样本局部解析
+    st.markdown("#### 🔬 单样本预测原理解析 (Local Explainer)")
     st.write("请选择特定的观测样本，系统将生成瀑布图（Waterfall Plot），展示各项特征数值是如何推导并得出当前预测分类的。")
     
     sample_opts = st.session_state['sample_ids']
@@ -166,29 +208,25 @@ if st.session_state.get('predict_done', False):
         with st.spinner("系统正在进行底层特征积分推导，请稍候..."):
             try:
                 import shap
-                # 获取选中的样本索引
                 idx = list(sample_opts).index(sel_sample)
                 
-                # 提取模型和预处理后的数据
                 pipeline = st.session_state['pipeline']
                 model = pipeline.named_steps['classifier']
                 
-                # 拿到该样本经过数据清洗和降维后的真实数值
                 X_transformed = pipeline[:-1].transform(st.session_state['X_new'])
                 sample_data = X_transformed[[idx]]
                 
-                # 获取到底保留了哪些特征的名字
                 feature_selector = pipeline.named_steps['feature_selector']
                 survived_indices = feature_selector.final_indices_
                 survived_features = np.array(st.session_state['X_new'].columns)[survived_indices]
                 
                 model_name = type(model).__name__
-                fig, ax = plt.subplots(figsize=(8, 6))
                 
                 if "XGB" in model_name or "RandomForest" in model_name:
+                    plt.clf() # 清空画板防止重影
+                    
                     explainer = shap.TreeExplainer(model)
                     shap_values = explainer(sample_data)
-                    
                     shap_values.feature_names = list(survived_features)
                     
                     if len(shap_values.shape) == 3: # 多分类
@@ -197,14 +235,14 @@ if st.session_state.get('predict_done', False):
                     else: # 二分类
                         shap.plots.waterfall(shap_values[0], show=False)
                         
-                    st.pyplot(fig)
+                    st.pyplot(plt.gcf()) # 强行抓取底层的全局画板
                     st.success(f"✅ 解析完成。上方图表展示了样本【{sel_sample}】各变量对最终分类结果的正负向贡献。")
                     
                 else:
                     st.warning("⚠️ 平台说明：当前训练底层使用的是 SVM 或 MLP 架构。因算力与算法兼容性限制，目前平台仅支持为 XGBoost 和 随机森林 生成 SHAP 瀑布图。")
                     
             except ImportError:
-                st.error("❌ 缺失组件模块：您的环境中未安装 `shap` 依赖库。请联系平台管理员或在终端执行 `pip install shap`。")
+                st.error("❌ 缺失组件模块：您的环境中未安装 `shap` 依赖库。请在终端执行 `pip install shap`。")
             except Exception as e:
                 st.error(f"❌ 解析运算过程中发生计算异常: {e}")
 
