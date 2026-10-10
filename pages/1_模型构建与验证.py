@@ -96,7 +96,25 @@ if st.session_state['data_loaded']:
     df = st.session_state['df_raw']
     st.divider()
     st.header("2. 变量映射与基准算法配置")
-    
+    # 🌟 新增：优雅折叠的数据处理参数面板
+    with st.expander("🛠️ 高级设置：数据清洗与特征筛选 (非专业人士请保持默认)", expanded=False):
+        st.markdown("在此调整底层 `data_processor` 的处理策略，系统将自动拼接至建模 Pipeline。")
+        col_prep1, col_prep2 = st.columns(2)
+        with col_prep1:
+            impute_strategy = st.selectbox("缺失值填充", ["median", "mean", "most_frequent", "knn"], index=0)
+            scale_method = st.selectbox("特征缩放", ["StandardScaler (Z-Score)", "MinMaxScaler (0-1缩放)", "None"], index=0)
+        with col_prep2:
+            # 这里保留你原来的下拉框，为了不破坏后续代码的引用
+            sel_method = st.selectbox("前置特征统计检验方法", ['fdr', 'kbest', 'fwe', 'none'], index=0)
+            if sel_method in ["fdr", "fwe"]:
+                alpha_val = st.number_input("显著性阈值 (Alpha)", min_value=0.001, max_value=0.5, value=0.05)
+                k_val = 100
+            elif sel_method == "kbest":
+                k_val = st.number_input("保留特征数 (K)", min_value=1, value=50)
+                alpha_val = 0.05
+            else:
+                alpha_val = 0.05; k_val = 100
+            corr_threshold = st.slider("共线性剔除阈值", 0.5, 1.0, 0.9, step=0.05)
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("🎯 变量属性定义")
