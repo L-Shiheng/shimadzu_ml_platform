@@ -346,6 +346,66 @@ if st.session_state['data_loaded']:
                 st.session_state['model_name_short'] = model_name_short
                 st.session_state['model_trained'] = True
                 st.success(f"✅ 模型拟合流程执行完毕。{model_name_short} 预测器对象及评估指标已生成。")
+                # ==========================================
+                # ☁️ 中心化云端日志记录模块 (安全直连版)
+                # ==========================================
+                try:
+                    import pandas as pd
+                    import datetime
+                    import uuid
+                    import io
+                    from github import Github
+                    from github.GithubException import UnknownObjectException
+                    
+                    # 生成当前用户的唯一会话ID
+                    if 'session_id' not in st.session_state:
+                        st.session_state['session_id'] = str(uuid.uuid4())[:8]
+                        
+                    # 1. 组装新日志数据
+                    new_log_data = [{
+                        "时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "页面": "1_模型构建与验证",
+                        "操作": f"成功训练模型 ({model_name_short})",
+                        "模型": model_name_short,
+                        "样本量": int(X.shape[0]),
+                        "会话ID": st.session_state['session_id'],
+                        "使用者": "罗世恒"
+                    }]
+                    new_row = pd.DataFrame(new_log_data)
+                    
+                    # ----------------------------------------
+                    # 🔐 安全获取密码区
+                    # ----------------------------------------
+                    # 让 Streamlit 自动去保险箱拿你存好的 GITHUB_TOKEN
+                    GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"] 
+                    REPO_NAME = "L-Shiheng/Central_App_Logs"
+                    
+                    APP_ID = "组学建模平台" 
+                    FILE_PATH = f"{APP_ID}_运行日志.csv" 
+                    
+                    # 2. 连接 GitHub
+                    g = Github(GITHUB_TOKEN)
+                    repo = g.get_repo(REPO_NAME)
+                    
+                    try:
+                        # 3. 尝试读取已有文件并追加
+                        contents = repo.get_contents(FILE_PATH)
+                        df_old = pd.read_csv(io.StringIO(contents.decoded_content.decode('utf-8')))
+                        df_combined = pd.concat([df_old, new_row], ignore_index=True)
+                        csv_data = df_combined.to_csv(index=False)
+                        repo.update_file(contents.path, f"🤖 追加日志 - {APP_ID}", csv_data, contents.sha)
+                        
+                    except UnknownObjectException:
+                        # 4. 如果是第一次运行，自动新建文件
+                        csv_data = new_row.to_csv(index=False)
+                        repo.create_file(FILE_PATH, f"🤖 初始化日志库 - {APP_ID}", csv_data)
+                        
+                    # 5. 成功提示
+                    st.toast("☁️ 运行日志已静默同步至中心云端!", icon="✅")
+                    
+                except Exception as e:
+                    # 🚨 我们把隐藏改成了报错，这样万一失败立刻就能看到原因
+                    st.error(f"🚨 日志同步失败，捕捉到写入错误: {e}")
             except Exception as e:
                 st.error(f"建模过程发生异常中断: {e}")
 
