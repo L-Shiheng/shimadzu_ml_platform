@@ -59,3 +59,66 @@ st.markdown("""
 > *   本平台核心算法基于主流的 `scikit-learn` 和 `XGBoost` 机器学习框架构建。
 > *   内置的数据标准化、交叉验证（CV）以及 SHAP 特征归因分析流程，完全符合主流学术期刊对于机器学习方法学的严谨性要求。
 """)
+# ==========================================
+# 👁️ 隐藏式后台：跨应用日志可视化看板
+# ==========================================
+# st.expander 默认 expanded=False，它就像一个折叠条，不点开根本不显眼
+with st.expander("🛠️ 系统级运行日志看板 (仅管理员查阅)", expanded=False):
+    try:
+        import pandas as pd
+        import io
+        from github import Github
+        import streamlit as st
+        
+        # 1. 安全获取密码并连接仓库
+        # （这里用的是你刚刚存进 secrets 里的同一把钥匙）
+        GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"] 
+        REPO_NAME = "L-Shiheng/Central_App_Logs"
+        
+        g = Github(GITHUB_TOKEN)
+        repo = g.get_repo(REPO_NAME)
+        
+        st.caption("以下数据实时拉取自中心化 GitHub 云端仓库")
+        
+        # 2. 交互式选择要查看的 App (为了以后扩展多 App 准备)
+        # 获取仓库里所有 csv 文件
+        files = [f.path for f in repo.get_contents("") if f.path.endswith('.csv')]
+        
+        if not files:
+            st.info("📭 中心仓库目前是空的，还没有任何 App 产生日志。")
+        else:
+            # 建立一个下拉菜单，如果你有多个 App，就可以随意切换看数据
+            selected_file = st.selectbox("📂 选择要查看的应用日志:", files)
+            
+            # 3. 拉取选中文件的数据
+            contents = repo.get_contents(selected_file)
+            df_log = pd.read_csv(io.StringIO(contents.decoded_content.decode('utf-8')))
+            
+            # 4. 展示原始表格 (限制高度，防止占用太多屏幕)
+            st.dataframe(df_log, use_container_width=True, height=200)
+            
+            # 5. 可视化分析
+            if not df_log.empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.caption(f"📊 {selected_file.split('_')[0]} - 模型调用频次")
+                    # 统计模型使用次数并画柱状图
+                    if '模型' in df_log.columns:
+                        model_counts = df_log['模型'].value_counts()
+                        st.bar_chart(model_counts)
+                    else:
+                        st.write("暂无模型调用数据")
+                    
+                with col2:
+                    st.caption("📈 近期平台活跃趋势")
+                    # 按天统计使用次数
+                    if '时间' in df_log.columns:
+                        df_log['日期'] = pd.to_datetime(df_log['时间']).dt.date
+                        date_counts = df_log['日期'].value_counts().sort_index()
+                        st.line_chart(date_counts)
+                    else:
+                        st.write("暂无时间分布数据")
+                        
+    except Exception as e:
+        # 即使这里报错了，也只会显示在这个折叠面板里，绝不影响网页其他部分的正常运行
+        st.warning(f"获取日志或渲染面板时发生异常，但不影响系统主功能。\n错误详情: {e}")
