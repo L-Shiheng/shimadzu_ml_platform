@@ -113,7 +113,40 @@ if st.session_state['data_loaded']:
             "SVM (支持向量机)",
             "MLP (多层感知机)"
         ])
-        sel_method = st.selectbox("前置特征统计检验方法", ['fdr', 'kbest', 'fwe'], index=0)
+        # ==========================================
+        # ⚙️ 第一阶段：数据预处理与特征工程参数配置
+        # ==========================================
+        st.write("---")
+        with st.expander("🛠️ 展开/折叠 数据预处理与特征筛选参数", expanded=True):
+            col_p1, col_p2 = st.columns(2)
+            
+            with col_p1:
+                st.markdown("#### 1. 缺失值与标准化")
+                impute_strategy = st.selectbox(
+                    "缺失值填充策略 (Imputation):", 
+                    options=["median", "mean", "most_frequent", "knn"],
+                    index=0
+                )
+                scale_method = st.selectbox(
+                    "数据标准化 (Scaling):", 
+                    options=["StandardScaler (Z-Score)", "MinMaxScaler (0-1缩放)", "None (不缩放)"],
+                    index=0
+                )
+                
+            with col_p2:
+                st.markdown("#### 2. 组学特征筛选")
+                sel_method = st.selectbox("核心筛选算法:", options=["fdr", "kbest", "fwe", "none"], index=0)
+                
+                if sel_method in ["fdr", "fwe"]:
+                    alpha_val = st.number_input("P值显著性阈值 (Alpha):", min_value=0.001, max_value=0.500, value=0.050, step=0.010, format="%.3f")
+                    k_val = 100 
+                elif sel_method == "kbest":
+                    k_val = st.number_input("保留特征数量 (K):", min_value=1, max_value=10000, value=50, step=10)
+                    alpha_val = 0.05 
+                else:
+                    alpha_val, k_val = 0.05, 100
+                    
+                corr_threshold = st.slider("共线性剔除阈值:", min_value=0.50, max_value=1.00, value=0.90, step=0.05)
 
     st.write("---")
     st.subheader("🩺 矩阵兼容性与结构评估")
@@ -277,12 +310,80 @@ if st.session_state['data_loaded']:
                 st.session_state['label_encoder'] = le
                 is_multiclass = len(le.classes_) > 2
                 
+                # ==========================================
+                # 🤖 动态构建预处理 Pipeline
+                # ==========================================
+                if impute_strategy == 'knn':
+                    from sklearn.impute import KNNImputer
+                    imputer_step = ('imputer', KNNImputer(n_neighbors=5))
+                else:
+                    imputer_step = ('imputer', SimpleImputer(strategy=impute_strategy))
+                    
+                from sklearn.preprocessing import MinMaxScaler
+                if "StandardScaler" in scale_method:
+                    scaler_step = ('scaler', StandardScaler())
+                elif "MinMaxScaler" in scale_method:
+                    scaler_step = ('scaler', MinMaxScaler())
+                else:
+                    scaler_step = ('scaler', 'passthrough')
+
                 ms_pipeline = Pipeline(steps=[
-                    ('imputer', SimpleImputer(strategy='median')), 
-                    ('scaler', StandardScaler()), 
-                    ('feature_selector', MassSpecFeatureSelector(selection_method=sel_method)),
+                    imputer_step, 
+                    scaler_step, 
+                    ('feature_selector', MassSpecFeatureSelector(
+                        selection_method=sel_method,
+                        alpha=alpha_val,
+                        n_features_to_select=k_val,
+                        corr_threshold=corr_threshold
+                    )),
                     ('classifier', classifier_obj) 
                 ])
+
+                # ==========================================
+                # ☁️ 中心化云端日志记录模块 (安全直连版)
+                # ==========================================
+                try:
+                    import datetime
+                    import uuid
+                    import io
+                    from github import Github
+                    from github.GithubException import UnknownObjectException
+                    
+                    if 'session_id' not in st.session_state:
+                        st.session_state['session_id'] = str(uuid.uuid4())[:8]
+                        
+                    new_log_data = [{
+                        "时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "页面": "1_模型构建与验证",
+                        "操作": f"成功训练模型 ({model_name_short})",
+                        "模型": model_name_short,
+                        "样本量": int(X_df.shape[0]),
+                        "会话ID": st.session_state['session_id'],
+                        "使用者": "罗世恒"
+                    }]
+                    new_row = pd.DataFrame(new_log_data)
+                    
+                    GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"] 
+                    REPO_NAME = "L-Shiheng/Central_App_Logs"
+                    APP_ID = "组学建模平台" 
+                    FILE_PATH = f"{APP_ID}_运行日志.csv" 
+                    
+                    g = Github(GITHUB_TOKEN)
+                    repo = g.get_repo(REPO_NAME)
+                    
+                    try:
+                        contents = repo.get_contents(FILE_PATH)
+                        df_old = pd.read_csv(io.StringIO(contents.decoded_content.decode('utf-8')))
+                        df_combined = pd.concat([df_old, new_row], ignore_index=True)
+                        csv_data = df_combined.to_csv(index=False)
+                        repo.update_file(contents.path, f"🤖 追加日志 - {APP_ID}", csv_data, contents.sha)
+                    except UnknownObjectException:
+                        csv_data = new_row.to_csv(index=False)
+                        repo.create_file(FILE_PATH, f"🤖 初始化日志库 - {APP_ID}", csv_data)
+                        
+                    st.toast("☁️ 运行日志已静默同步至中心云端!", icon="✅")
+                except Exception as e:
+                    st.error(f"🚨 日志同步失败: {e}")
                 
                 # --- CV 准确率与预测 ---
                 ms_pipeline.fit(X, y)
