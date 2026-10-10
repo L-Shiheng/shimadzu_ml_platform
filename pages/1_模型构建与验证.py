@@ -429,7 +429,7 @@ if st.session_state['data_loaded']:
     # --- 第四阶段：结果展示与多线 ROC 提取 ---
     if st.session_state['model_trained']:
         st.divider()
-        st.header(f"📊 4. 模型效能评估与生物标志物权重解析")
+        st.header(f"4. 模型效能评估与生物标志物权重解析")
         
         # 指标看板
         col_metric1, col_metric2, col_metric3 = st.columns(3)
@@ -523,7 +523,7 @@ if st.session_state['data_loaded']:
                 st.pyplot(fig_multi)
 
         st.divider()
-        st.header("📥 5. 分析资产与日志数据导出")
+        st.header("5. 分析资产与日志数据导出")
         col_dl1, col_dl2, col_dl3 = st.columns(3)
         buffer = io.BytesIO()
         joblib.dump({'pipeline': st.session_state['trained_pipeline'], 'label_encoder': st.session_state['label_encoder']}, buffer)
