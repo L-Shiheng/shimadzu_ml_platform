@@ -131,7 +131,6 @@ if st.session_state['data_loaded']:
             "SVM (支持向量机)",
             "MLP (多层感知机)"
         ])
-        sel_method = st.selectbox("前置特征统计检验方法", ['fdr', 'kbest', 'fwe'], index=0)
 
     st.write("---")
     st.subheader("🩺 矩阵兼容性与结构评估")
