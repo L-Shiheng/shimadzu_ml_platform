@@ -94,6 +94,53 @@ if model_file and data_file:
                         st.session_state['has_target'] = True
                     else:
                         st.session_state['has_target'] = False
+                    # ==========================================
+                    # ☁️ 中心化云端日志记录模块 (验证与预测专用版)
+                    # ==========================================
+                    try:
+                        import datetime
+                        import uuid
+                        import io
+                        from github import Github
+                        from github.GithubException import UnknownObjectException
+                        
+                        if 'session_id' not in st.session_state:
+                            st.session_state['session_id'] = str(uuid.uuid4())[:8]
+                            
+                        # 自动抓取当前页面的运行数据
+                        new_log_data = [{
+                            "时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "页面": "独立验证与解释分析", 
+                            "操作": "执行外部验证与模型预测", 
+                            "模型": model_file.name,          # 🪄 神奇之处：自动提取上传的 .pkl 文件名
+                            "样本量": int(X_new.shape[0]),    # 🪄 神奇之处：自动计算上传的数据行数
+                            "会话ID": st.session_state['session_id'],
+                            "使用者": "罗世恒"
+                        }]
+                        
+                        GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"] 
+                        REPO_NAME = "L-Shiheng/Central_App_Logs"
+                        APP_ID = "组学建模平台" 
+                        FILE_PATH = f"{APP_ID}_运行日志.csv" 
+                        
+                        g = Github(GITHUB_TOKEN)
+                        repo = g.get_repo(REPO_NAME)
+                        
+                        try:
+                            contents = repo.get_contents(FILE_PATH)
+                            df_old = pd.read_csv(io.StringIO(contents.decoded_content.decode('utf-8')))
+                            df_combined = pd.concat([df_old, pd.DataFrame(new_log_data)], ignore_index=True)
+                            csv_data = df_combined.to_csv(index=False)
+                            repo.update_file(contents.path, f"🤖 追加预测日志 - {APP_ID}", csv_data, contents.sha)
+                        except UnknownObjectException:
+                            csv_data = pd.DataFrame(new_log_data).to_csv(index=False)
+                            repo.create_file(FILE_PATH, f"🤖 初始化日志库 - {APP_ID}", csv_data)
+                            
+                        # 这边为了不打扰主流程，就不弹 toast 提示了，让它真正“静默”
+                        
+                    except Exception as e:
+                        st.error(f"🚨 日志同步失败: {e}") 
+                    # ==========================================
 
                 except ValueError as ve:
                     st.error(f"❌ 矩阵特征映射失败。\n系统提示：输入数据的特征列与原模型不一致。请检查是否存在拼写差异或特征遗漏。详细错误：{ve}")
